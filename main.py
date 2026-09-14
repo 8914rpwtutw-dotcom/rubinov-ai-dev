@@ -20,10 +20,11 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Проверенные стабильные модели для бесплатного ключа
+# Актуальные имена моделей для v1beta в новой библиотеке google-genai
 MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest"
 ]
 
 def get_api_key():
