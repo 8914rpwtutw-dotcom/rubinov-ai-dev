@@ -1,13 +1,10 @@
 import os
-import time
 import uuid
-import base64
 from typing import Optional
 from fastapi import FastAPI, HTTPException, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 app = FastAPI()
 
@@ -20,12 +17,11 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Точные пути моделей с префиксом models/ для v1beta
+# Проверенный список стабильных моделей
 MODELS = [
-    "models/gemini-2.5-flash",
-    "models/gemini-2.0-flash",
-    "models/gemini-1.5-flash",
-    "models/gemini-1.5-pro"
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+    "gemini-1.0-pro"
 ]
 
 def get_api_key():
@@ -43,23 +39,24 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
             detail="API-ключ не найден. Проверьте переменную GEMINI_API_KEY на Render."
         )
 
+    genai.configure(api_key=api_key)
+
     contents = []
     if file_bytes and mime_type:
-        contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
+        contents.append({
+            "mime_type": mime_type,
+            "data": file_bytes
+        })
     if prompt:
         contents.append(prompt)
-
-    client = genai.Client(api_key=api_key)
 
     last_error_msg = ""
 
     for model_name in MODELS:
         try:
             print(f"[LOG]: Отправка запроса к модели {model_name}...")
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents
-            )
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(contents)
             if response.text:
                 return response.text
         except Exception as e:
