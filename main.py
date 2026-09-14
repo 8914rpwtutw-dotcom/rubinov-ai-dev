@@ -21,10 +21,11 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Используем точные официальные названия моделей Gemini API
+# Оптимальный список моделей: базовая с высокими лимитами -> мощная -> легкая
 MODELS = [
     "gemini-2.5-flash",
-    "gemini-1.5-flash"
+    "gemini-2.5-pro",
+    "gemini-1.5-flash-8b"
 ]
 
 current_key_idx = 0
@@ -37,7 +38,7 @@ def get_api_keys():
         os.getenv("GEMINI_KEY_3"),
         os.getenv("GEMINI_API_KEY")
     ]
-    # Очищаем ключи от случайно скопированных пробелов
+    # Очищаем от случайных пробелов
     valid_keys = [k.strip() for k in keys if k and k.strip()]
     return valid_keys
 
@@ -50,7 +51,7 @@ def generate_image_response(prompt: str) -> Optional[str]:
         try:
             client = get_gemini_client(key)
             result = client.models.generate_images(
-                model='imagen-3.0-generate-002',
+                model='imagen-3.0-generate-001',
                 prompt=prompt,
                 config=types.GenerateImagesConfig(
                     number_of_images=1,
@@ -78,7 +79,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 
     api_keys = get_api_keys()
     if not api_keys:
-        print("[ERROR]: В Environment Variables не найдено ни одного ключа!")
+        print("[ERROR]: В Environment Variables на Render не найдено ни одного ключа!")
         raise HTTPException(
             status_code=500,
             detail="API-ключи не найдены в Environment Variables на Render."
@@ -107,26 +108,28 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
             return response.text
 
         except APIError as e:
-            print(f"[API ERROR] Model: {active_model} | Code: {e.code} | Message: {e}")
-            if e.code in [503, 429] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e) or "high demand" in str(e).lower():
-                current_model_idx += 1
-                if current_model_idx >= num_models:
-                    current_model_idx = 0
-                    current_key_idx = (current_key_idx + 1) % num_keys
-                time.sleep(0.3)
+            print(f"[API ERROR] Model: {active_model} | Key Index: {current_key_idx % num_keys} | Code: {e.code} | Message: {e}")
+            
+            # При превышении лимита (429) переключаем И модель, И ключ
+            if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e):
+                current_key_idx = (current_key_idx + 1) % num_keys
+                current_model_idx = (current_model_idx + 1) % num_models
+                time.sleep(0.5)
                 continue
             elif e.code == 404 or "not found" in str(e).lower():
                 current_model_idx = (current_model_idx + 1) % num_models
                 continue
             else:
-                break
+                current_key_idx = (current_key_idx + 1) % num_keys
+                continue
         except Exception as gen_err:
             print(f"[UNEXPECTED ERROR]: {gen_err}")
-            break
+            current_key_idx = (current_key_idx + 1) % num_keys
+            continue
 
     raise HTTPException(
         status_code=500,
-        detail="Сервис ИИ перегружен или новый ключ отклонен Google API. Проверьте вкладку Logs на Render."
+        detail="Все доступные API-ключи исчерпали лимиты. Подождите пару минут или добавьте GEMINI_KEY_2 на Render."
     )
 
 @app.get("/health")
