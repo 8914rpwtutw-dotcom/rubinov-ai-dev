@@ -20,11 +20,12 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Актуальные имена моделей для v1beta в новой библиотеке google-genai
+# Точные пути моделей с префиксом models/ для v1beta
 MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash-latest"
+    "models/gemini-2.5-flash",
+    "models/gemini-2.0-flash",
+    "models/gemini-1.5-flash",
+    "models/gemini-1.5-pro"
 ]
 
 def get_api_key():
