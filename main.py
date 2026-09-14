@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from google import genai
 from google.genai import types
-from google.genai.errors import APIError
 
 app = FastAPI()
 
@@ -21,57 +20,26 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Модели для теста на 1 ключе (сначала базовая с большими лимитами)
+# Проверенные стабильные модели для бесплатного ключа
 MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-pro"
+    "gemini-1.5-flash",
+    "gemini-1.5-pro"
 ]
 
 def get_api_key():
-    # Получаем единственный ключ из Environment Variables
     key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY_1")
     if key:
         return key.strip()
     return None
 
-def generate_image_response(prompt: str) -> Optional[str]:
-    api_key = get_api_key()
-    if not api_key:
-        return None
-    try:
-        client = genai.Client(api_key=api_key)
-        result = client.models.generate_images(
-            model='imagen-3.0-generate-001',
-            prompt=prompt,
-            config=types.GenerateImagesConfig(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio="1:1"
-            )
-        )
-        if result.generated_images:
-            img_bytes = result.generated_images[0].image.image_bytes
-            base64_img = base64.b64encode(img_bytes).decode('utf-8')
-            return f'<img src="data:image/jpeg;base64,{base64_img}" alt="Generated Image" style="max-width:100%; border-radius:12px; margin-top:8px;" />'
-    except Exception as img_err:
-        print(f"[IMAGE GEN ERROR]: {img_err}")
-    return None
-
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
     api_key = get_api_key()
     if not api_key:
-        print("[ERROR]: API-ключ не найден в Environment Variables!")
+        print("[ERROR]: API-ключ не найден!")
         raise HTTPException(
             status_code=500,
             detail="API-ключ не найден. Проверьте переменную GEMINI_API_KEY на Render."
         )
-
-    # Проверка на генерацию картинок
-    lowered = prompt.lower()
-    if any(kw in lowered for kw in ["нарисуй", "сгенерируй картинку", "создай картинку", "нарисуй изображение", "draw", "generate image"]):
-        img_html = generate_image_response(prompt)
-        if img_html:
-            return f"Вот ваше сгенерированное изображение:\n\n{img_html}"
 
     contents = []
     if file_bytes and mime_type:
@@ -81,36 +49,25 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 
     client = genai.Client(api_key=api_key)
 
-    # Перебираем доступные модели
-    for model_name in MODELS:
-        # Пробуем до 2 раз для каждой модели (с авто-паузой при лимитах)
-        for attempt in range(2):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=contents
-                )
-                return response.text
+    last_error_msg = ""
 
-            except APIError as e:
-                print(f"[API ERROR] Model: {model_name} | Code: {e.code} | Message: {e}")
-                
-                # Если превышен лимит (429) — ждем 2 секунды и пробуем еще раз
-                if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e):
-                    time.sleep(2.0)
-                    continue
-                # Если модель не найдена — переходим к следующей
-                elif e.code == 404 or "not found" in str(e).lower():
-                    break
-                else:
-                    break
-            except Exception as gen_err:
-                print(f"[UNEXPECTED ERROR]: {gen_err}")
-                break
+    for model_name in MODELS:
+        try:
+            print(f"[LOG]: Отправка запроса к модели {model_name}...")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents
+            )
+            if response.text:
+                return response.text
+        except Exception as e:
+            last_error_msg = str(e)
+            print(f"[ERROR Model {model_name}]: {last_error_msg}")
+            continue
 
     raise HTTPException(
         status_code=500,
-        detail="Превышен бесплатный лимит Google API (RPM/TPM). Подождите 10-15 секунд и отправьте запрос снова."
+        detail=f"Ошибка Google API: {last_error_msg}"
     )
 
 @app.get("/health")
@@ -435,7 +392,7 @@ async def get_chat_ui():
                         <button id="file-btn" onclick="document.getElementById('file-input').click()" title="Сделать фото или прикрепить файл">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                         </button>
-                        <input type="text" id="prompt-input" placeholder="Спросите или попросите нарисовать..." onkeydown="handleKeyPress(event)" />
+                        <input type="text" id="prompt-input" placeholder="Задайте вопрос..." onkeydown="handleKeyPress(event)" />
                         <button class="btn-send" onclick="sendMessage()">Отправить</button>
                     </div>
                 </div>
@@ -543,7 +500,7 @@ async def get_chat_ui():
                             <path d="M42 45 Q46 40 50 45 Q54 40 58 45 Q60 52 50 56 Q40 52 42 45 Z" stroke="#ffffff" stroke-width="2.5" fill="none" />
                         </svg>
                         <h1>Привет! Я Rubinov AI (BETA)</h1>
-                        <p>Чем я могу помочь тебе сегодня? Могу ответить на вопросы, обработать файлы или нарисовать картинку.</p>
+                        <p>Чем я могу помочь тебе сегодня?</p>
                     `;
                     chatContainer.appendChild(welcome);
                     return;
