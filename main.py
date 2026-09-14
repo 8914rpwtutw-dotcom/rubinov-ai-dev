@@ -17,11 +17,12 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Проверенный список стабильных моделей
+# Актуальные рабочие модели (старые gemini-1.0-pro и др. убраны, чтобы не было ошибки 404)
 MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
     "gemini-1.5-flash",
-    "gemini-1.5-pro",
-    "gemini-1.0-pro"
+    "gemini-1.5-pro"
 ]
 
 def get_api_key():
@@ -57,7 +58,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
             print(f"[LOG]: Отправка запроса к модели {model_name}...")
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(contents)
-            if response.text:
+            if response and response.text:
                 return response.text
         except Exception as e:
             last_error_msg = str(e)
