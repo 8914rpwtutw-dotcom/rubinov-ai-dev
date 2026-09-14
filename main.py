@@ -21,11 +21,10 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Используем быстрый и оптимизированный gemini-3.1-flash-lite с фолбэками
+# Используем точные официальные названия моделей Gemini API
 MODELS = [
-    "gemini-3.1-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-2.0-flash"
+    "gemini-2.5-flash",
+    "gemini-1.5-flash"
 ]
 
 current_key_idx = 0
@@ -38,7 +37,9 @@ def get_api_keys():
         os.getenv("GEMINI_KEY_3"),
         os.getenv("GEMINI_API_KEY")
     ]
-    return [k.strip() for k in keys if k and k.strip()]
+    # Очищаем ключи от случайно скопированных пробелов
+    valid_keys = [k.strip() for k in keys if k and k.strip()]
+    return valid_keys
 
 def get_gemini_client(api_key: str):
     return genai.Client(api_key=api_key)
@@ -61,7 +62,8 @@ def generate_image_response(prompt: str) -> Optional[str]:
                 img_bytes = result.generated_images[0].image.image_bytes
                 base64_img = base64.b64encode(img_bytes).decode('utf-8')
                 return f'<img src="data:image/jpeg;base64,{base64_img}" alt="Generated Image" style="max-width:100%; border-radius:12px; margin-top:8px;" />'
-        except Exception:
+        except Exception as img_err:
+            print(f"[IMAGE GEN ERROR]: {img_err}")
             continue
     return None
 
@@ -76,9 +78,10 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 
     api_keys = get_api_keys()
     if not api_keys:
+        print("[ERROR]: В Environment Variables не найдено ни одного ключа!")
         raise HTTPException(
             status_code=500,
-            detail="API-ключи не найдены в Environment Variables."
+            detail="API-ключи не найдены в Environment Variables на Render."
         )
 
     num_keys = len(api_keys)
@@ -104,6 +107,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
             return response.text
 
         except APIError as e:
+            print(f"[API ERROR] Model: {active_model} | Code: {e.code} | Message: {e}")
             if e.code in [503, 429] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e) or "high demand" in str(e).lower():
                 current_model_idx += 1
                 if current_model_idx >= num_models:
@@ -116,12 +120,13 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
                 continue
             else:
                 break
-        except Exception:
+        except Exception as gen_err:
+            print(f"[UNEXPECTED ERROR]: {gen_err}")
             break
 
     raise HTTPException(
         status_code=500,
-        detail="Сервис ИИ перегружен в данный момент. Повторите попытку через несколько секунд."
+        detail="Сервис ИИ перегружен или новый ключ отклонен Google API. Проверьте вкладку Logs на Render."
     )
 
 @app.get("/health")
