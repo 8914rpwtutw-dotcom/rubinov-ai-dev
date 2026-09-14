@@ -21,73 +21,57 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Оптимальный список моделей: базовая с высокими лимитами -> мощная -> легкая
+# Модели для теста на 1 ключе (сначала базовая с большими лимитами)
 MODELS = [
     "gemini-2.5-flash",
-    "gemini-2.5-pro",
-    "gemini-1.5-flash-8b"
+    "gemini-2.5-pro"
 ]
 
-current_key_idx = 0
-current_model_idx = 0
-
-def get_api_keys():
-    keys = [
-        os.getenv("GEMINI_KEY_1"),
-        os.getenv("GEMINI_KEY_2"),
-        os.getenv("GEMINI_KEY_3"),
-        os.getenv("GEMINI_API_KEY")
-    ]
-    # Очищаем от случайных пробелов
-    valid_keys = [k.strip() for k in keys if k and k.strip()]
-    return valid_keys
-
-def get_gemini_client(api_key: str):
-    return genai.Client(api_key=api_key)
+def get_api_key():
+    # Получаем единственный ключ из Environment Variables
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY_1")
+    if key:
+        return key.strip()
+    return None
 
 def generate_image_response(prompt: str) -> Optional[str]:
-    api_keys = get_api_keys()
-    for key in api_keys:
-        try:
-            client = get_gemini_client(key)
-            result = client.models.generate_images(
-                model='imagen-3.0-generate-001',
-                prompt=prompt,
-                config=types.GenerateImagesConfig(
-                    number_of_images=1,
-                    output_mime_type="image/jpeg",
-                    aspect_ratio="1:1"
-                )
+    api_key = get_api_key()
+    if not api_key:
+        return None
+    try:
+        client = genai.Client(api_key=api_key)
+        result = client.models.generate_images(
+            model='imagen-3.0-generate-001',
+            prompt=prompt,
+            config=types.GenerateImagesConfig(
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio="1:1"
             )
-            if result.generated_images:
-                img_bytes = result.generated_images[0].image.image_bytes
-                base64_img = base64.b64encode(img_bytes).decode('utf-8')
-                return f'<img src="data:image/jpeg;base64,{base64_img}" alt="Generated Image" style="max-width:100%; border-radius:12px; margin-top:8px;" />'
-        except Exception as img_err:
-            print(f"[IMAGE GEN ERROR]: {img_err}")
-            continue
+        )
+        if result.generated_images:
+            img_bytes = result.generated_images[0].image.image_bytes
+            base64_img = base64.b64encode(img_bytes).decode('utf-8')
+            return f'<img src="data:image/jpeg;base64,{base64_img}" alt="Generated Image" style="max-width:100%; border-radius:12px; margin-top:8px;" />'
+    except Exception as img_err:
+        print(f"[IMAGE GEN ERROR]: {img_err}")
     return None
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
-    global current_key_idx, current_model_idx
-    
+    api_key = get_api_key()
+    if not api_key:
+        print("[ERROR]: API-ключ не найден в Environment Variables!")
+        raise HTTPException(
+            status_code=500,
+            detail="API-ключ не найден. Проверьте переменную GEMINI_API_KEY на Render."
+        )
+
+    # Проверка на генерацию картинок
     lowered = prompt.lower()
     if any(kw in lowered for kw in ["нарисуй", "сгенерируй картинку", "создай картинку", "нарисуй изображение", "draw", "generate image"]):
         img_html = generate_image_response(prompt)
         if img_html:
             return f"Вот ваше сгенерированное изображение:\n\n{img_html}"
-
-    api_keys = get_api_keys()
-    if not api_keys:
-        print("[ERROR]: В Environment Variables на Render не найдено ни одного ключа!")
-        raise HTTPException(
-            status_code=500,
-            detail="API-ключи не найдены в Environment Variables на Render."
-        )
-
-    num_keys = len(api_keys)
-    num_models = len(MODELS)
-    total_attempts = num_keys * num_models * 2
 
     contents = []
     if file_bytes and mime_type:
@@ -95,41 +79,38 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
     if prompt:
         contents.append(prompt)
 
-    for attempt in range(total_attempts):
-        active_key = api_keys[current_key_idx % num_keys]
-        active_model = MODELS[current_model_idx % num_models]
+    client = genai.Client(api_key=api_key)
 
-        try:
-            client = get_gemini_client(active_key)
-            response = client.models.generate_content(
-                model=active_model,
-                contents=contents
-            )
-            return response.text
+    # Перебираем доступные модели
+    for model_name in MODELS:
+        # Пробуем до 2 раз для каждой модели (с авто-паузой при лимитах)
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents
+                )
+                return response.text
 
-        except APIError as e:
-            print(f"[API ERROR] Model: {active_model} | Key Index: {current_key_idx % num_keys} | Code: {e.code} | Message: {e}")
-            
-            # При превышении лимита (429) переключаем И модель, И ключ
-            if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e):
-                current_key_idx = (current_key_idx + 1) % num_keys
-                current_model_idx = (current_model_idx + 1) % num_models
-                time.sleep(0.5)
-                continue
-            elif e.code == 404 or "not found" in str(e).lower():
-                current_model_idx = (current_model_idx + 1) % num_models
-                continue
-            else:
-                current_key_idx = (current_key_idx + 1) % num_keys
-                continue
-        except Exception as gen_err:
-            print(f"[UNEXPECTED ERROR]: {gen_err}")
-            current_key_idx = (current_key_idx + 1) % num_keys
-            continue
+            except APIError as e:
+                print(f"[API ERROR] Model: {model_name} | Code: {e.code} | Message: {e}")
+                
+                # Если превышен лимит (429) — ждем 2 секунды и пробуем еще раз
+                if e.code in [429, 503] or "RESOURCE_EXHAUSTED" in str(e):
+                    time.sleep(2.0)
+                    continue
+                # Если модель не найдена — переходим к следующей
+                elif e.code == 404 or "not found" in str(e).lower():
+                    break
+                else:
+                    break
+            except Exception as gen_err:
+                print(f"[UNEXPECTED ERROR]: {gen_err}")
+                break
 
     raise HTTPException(
         status_code=500,
-        detail="Все доступные API-ключи исчерпали лимиты. Подождите пару минут или добавьте GEMINI_KEY_2 на Render."
+        detail="Превышен бесплатный лимит Google API (RPM/TPM). Подождите 10-15 секунд и отправьте запрос снова."
     )
 
 @app.get("/health")
