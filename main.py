@@ -21,7 +21,12 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-MODELS = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"]
+# Используем быстрый и оптимизированный gemini-3.1-flash-lite с фолбэками
+MODELS = [
+    "gemini-3.1-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash"
+]
 
 current_key_idx = 0
 current_model_idx = 0
@@ -104,7 +109,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
                 if current_model_idx >= num_models:
                     current_model_idx = 0
                     current_key_idx = (current_key_idx + 1) % num_keys
-                time.sleep(0.5)
+                time.sleep(0.3)
                 continue
             elif e.code == 404 or "not found" in str(e).lower():
                 current_model_idx = (current_model_idx + 1) % num_models
