@@ -33,7 +33,7 @@ app.add_middleware(
 
 JWT_SECRET = os.getenv("JWT_SECRET", "rubinov_super_secret_key_2026_secure")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_TELEGRAM_ID = str(os.getenv("ADMIN_TELEGRAM_ID", "")) # Ваш числовой Telegram ID для админ-панели в боте
+ADMIN_TELEGRAM_ID = str(os.getenv("ADMIN_TELEGRAM_ID", ""))
 
 security = HTTPBearer()
 DB_NAME = "rubinov_secure.db"
@@ -41,6 +41,7 @@ DB_NAME = "rubinov_secure.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    # Пользователи
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id TEXT PRIMARY KEY,
@@ -48,6 +49,7 @@ def init_db():
             tier TEXT DEFAULT 'free'
         )
     ''')
+    # Коды входа
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS login_codes (
             code TEXT PRIMARY KEY,
@@ -55,10 +57,21 @@ def init_db():
             expires_at REAL
         )
     ''')
+    # Активные сессии (лимит устройств)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_sessions (
             telegram_id TEXT,
             session_id TEXT PRIMARY KEY
+        )
+    ''')
+    # Таблица обращений в техподдержку (тикеты)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS support_tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id TEXT,
+            username TEXT,
+            message TEXT,
+            created_at REAL
         )
     ''')
     conn.commit()
@@ -101,15 +114,10 @@ def verify_login_code(code: str = Form(...)):
     cursor.execute("SELECT COUNT(*) FROM user_sessions WHERE telegram_id = ?", (telegram_id,))
     active_sessions_count = cursor.fetchone()[0]
     
-    # Лимиты: Free — 1 устройство, VIP — до 3 устройств
     max_devices = 3 if tier == 'vip' else 1
-    
     if active_sessions_count >= max_devices:
         conn.close()
-        raise HTTPException(
-            status_code=403, 
-            detail=f"Превышен лимит устройств ({max_devices} для вашего тарифа)."
-        )
+        raise HTTPException(status_code=403, detail=f"Превышен лимит устройств ({max_devices} для вашего тарифа).")
     
     cursor.execute("DELETE FROM login_codes WHERE code = ?", (code,))
     session_id = str(random.randint(10000000, 99999999))
@@ -261,7 +269,7 @@ async def get_root():
     return HTML_TEMPLATE
 
 
-# --- TELEGRAM БОТ С ПАНЕЛЬЮ АДМИНА, ПОДДЕРЖКОЙ И УПРАВЛЕНИЕМ ВИП ---
+# --- TELEGRAM БОТ ---
 @app.on_event("startup")
 async def on_startup():
     if not TELEGRAM_BOT_TOKEN:
@@ -270,8 +278,7 @@ async def on_startup():
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
 
-    # Состояние диалога с поддержкой в памяти (чтобы админ мог ответить пользователю)
-    # Ключ: admin_telegram_id, Значение: target_user_telegram_id
+    # Словарь памяти для администратора: какому пользователю он сейчас пишет ответ
     admin_reply_targets = {}
 
     @dp.message(Command("start"))
@@ -279,7 +286,6 @@ async def on_startup():
         t_id = str(m.from_user.id)
         uname = m.from_user.username or m.from_user.first_name
         
-        # Регистрируем пользователя при старте
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (t_id, uname))
@@ -288,15 +294,15 @@ async def on_startup():
 
         if t_id == ADMIN_TELEGRAM_ID:
             await m.answer(
-                "👑 **Панель Администратора Rubinov AI**\n\n"
-                "📌 **Команды управления:**\n"
-                "👥 /users — список всех пользователей (с возможностью выдать/забрать VIP)\n"
-                "🛠️ Поддержка: просто нажмите «Ответить» на пересланное сообщение пользователя."
+                "👑 **Панель Администратора**\n\n"
+                "📌 **Доступные команды:**\n"
+                "👥 /users — список всех пользователей (выдача/снятие VIP)\n"
+                "📬 /tickets — посмотреть активные запросы в поддержку"
             )
         else:
             await m.answer(
                 "👋 Добро пожаловать в **Rubinov AI**!\n\n"
-                "📌 **Доступные команды:**\n"
+                "📌 **Команды:**\n"
                 "👉 /login — получить код для входа на сайт\n"
                 "🆘 /support [текст] — написать в техническую поддержку"
             )
@@ -321,34 +327,73 @@ async def on_startup():
     @dp.message(Command("support"))
     async def cmd_support(m: aiogram_types.Message):
         t_id = str(m.from_user.id)
+        uname = m.from_user.username or m.from_user.first_name
         text_parts = m.text.split(maxsplit=1)
         
         if len(text_parts) < 2:
-            await m.answer("⚠️ Напишите ваш вопрос вместе с командой. Пример:\n`/support Не могу войти на сайт`", parse_mode="Markdown")
+            await m.answer("⚠️ Напишите ваш вопрос вместе с командой. Пример:\n`/support Помогите разобраться со входом`", parse_mode="Markdown")
             return
             
         support_text = text_parts[1]
         
-        if not ADMIN_TELEGRAM_ID:
-            await m.answer("❌ Администратор еще не настроен в системе.")
+        # Сохраняем тикет в базу данных
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO support_tickets (telegram_id, username, message, created_at) VALUES (?, ?, ?, ?)", 
+                       (t_id, uname, support_text, time.time()))
+        conn.commit()
+        conn.close()
+        
+        await m.answer("✅ Ваше обращение отправлено в поддержку! Администратор скоро ответит вам.")
+
+        # Уведомляем администратора
+        if ADMIN_TELEGRAM_ID:
+            user_label = f"@{uname}" if m.from_user.username else uname
+            notif_text = f"🆘 **Новый запрос в поддержку!**\n\n👤 От: {user_label} (ID: `{t_id}`)\n💬 Текст: {support_text}"
+            
+            builder = InlineKeyboardBuilder()
+            builder.button(text="✍️ Ответить", callback_data=f"ans_{t_id}")
+            
+            try:
+                await bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=notif_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+            except Exception:
+                pass
+
+    # --- АДМИН: СПИСОК ТИКЕТОВ ПОДДЕРЖКИ ---
+    @dp.message(Command("tickets"))
+    async def cmd_tickets(m: aiogram_types.Message):
+        if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
             return
 
-        # Пересылаем сообщение администратору с кнопкой для ответа
-        user_mention = f"@{m.from_user.username}" if m.from_user.username else m.from_user.first_name
-        msg_to_admin = (
-            f"🆘 **Новое обращение в поддержку!**\n\n"
-            f"👤 Пользователь: {user_mention}\n"
-            f"🆔 ID: `{t_id}`\n\n"
-            f"💬 Текст: {support_text}"
-        )
-        
-        builder = InlineKeyboardBuilder()
-        builder.button(text="✍️ Ответить пользователю", callback_data=f"answer_{t_id}")
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, telegram_id, username, message, created_at FROM support_tickets ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        conn.close()
 
-        await bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=msg_to_admin, reply_markup=builder.as_markup(), parse_mode="Markdown")
-        await m.answer("✅ Ваше сообщение успешно отправлено в поддержку! Ожидайте ответа.")
+        if not rows:
+            await m.answer("📭 Активных запросов в поддержку нет.")
+            return
 
-    # --- АДМИНСКАЯ КОМАНДА ДЛЯ ПРОСМОТРА ПОЛЬЗОВАТЕЛЕЙ ---
+        await m.answer(f"📬 **Активные обращения ({len(rows)}):**", parse_mode="Markdown")
+
+        for r in rows:
+            ticket_id, t_id, uname, msg, created = r[0], r[1], r[2], r[3], r[4]
+            time_str = time.strftime('%d.%m %H:%M', time.localtime(created))
+            
+            builder = InlineKeyboardBuilder()
+            builder.button(text="✍️ Ответить", callback_data=f"ans_{t_id}")
+            builder.button(text="🗑️ Удалить тикет", callback_data=f"delticket_{ticket_id}")
+            builder.adjust(1)
+
+            card_text = (
+                f"👤 <b>{uname}</b> (ID: <code>{t_id}</code>)\n"
+                f"🕒 Время: {time_str}\n"
+                f"💬 <b>Вопрос:</b> {msg}"
+            )
+            await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+
+    # --- АДМИН: СПИСОК ПОЛЬЗОВАТЕЛЕЙ И УПРАВЛЕНИЕ VIP ---
     @dp.message(Command("users"))
     async def cmd_admin_users(m: aiogram_types.Message):
         if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
@@ -361,33 +406,29 @@ async def on_startup():
         conn.close()
 
         if not rows:
-        def format_user_list(rows):
-            return "📭 База данных пользователей пуста."
+            await m.answer("📭 База пользователей пуста.")
+            return
 
-        text = f"📊 **Всего зарегистрировано:** {len(rows)} чел.\n\n"
+        await m.answer(f"📊 **Всего зарегистрировано пользователей:** {len(rows)}", parse_mode="Markdown")
+
         for r in rows:
             t_id, uname, tier = r[0], r[1] or "Без имени", r[2]
-            status_icon = "⭐ VIP" else "👤 Free"
-            text += f"• <b>{uname}</b> (ID: <code>{t_id}</code>) — {status_icon}\n"
-
-        await m.answer(text, parse_mode="HTML")
-
-        # Отправляем карточки управления для каждого пользователя
-        for r in rows:
-            t_id, uname, tier = r[0], r[1] or "Без имени", r[2]
+            status_icon = "⭐ VIP" if tier == 'vip' else "👤 Free"
+            
             builder = InlineKeyboardBuilder()
             if tier == 'free':
                 builder.button(text="⭐ Выдать VIP", callback_data=f"setvip_{t_id}")
             else:
-                builder.button(text="❌ Забрать VIP (в Free)", callback_data=f"setfree_{t_id}")
+                builder.button(text="❌ Забрать VIP", callback_data=f"setfree_{t_id}")
 
-            await m.answer(f"👤 <b>{uname}</b>\nID: <code>{t_id}</code>\nСтатус: <b>{tier.upper()}</b>", reply_markup=builder.as_markup(), parse_mode="HTML")
+            card_text = f"👤 <b>{uname}</b>\nID: <code>{t_id}</code>\nСтатус: <b>{status_icon}</b>"
+            await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-    # --- ОБРАБОТКА КНОПОК АДМИНА (ВЫДАЧА/СНЯТИЕ VIP И ОТВЕТЫ) ---
+    # --- КНОПКИ УПРАВЛЕНИЯ И ОТВЕТОВ ---
     @dp.callback_query(F.data.startswith("setvip_") | F.data.startswith("setfree_"))
     async def process_tier_change(callback: aiogram_types.CallbackQuery):
         if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
-            return await callback.answer("У вас нет прав.", show_alert=True)
+            return await callback.answer("Нет прав", show_alert=True)
 
         action, t_id = callback.data.split("_")
         new_tier = 'vip' if action == 'setvip' else 'free'
@@ -398,43 +439,57 @@ async def on_startup():
         conn.commit()
         conn.close()
 
-        status_text = "⭐ VIP-статус выдан!" if new_tier == 'vip' else "👤 Статус изменен на Free."
-        await callback.message.edit_text(callback.message.text + f"\n\n✅ <i>Изменено: {status_text}</i>", parse_mode="HTML")
-        await callback.answer(status_text)
+        status_msg = "⭐ VIP статус выдан!" if new_tier == 'vip' else "👤 Статус изменен на Free."
+        await callback.message.edit_text(callback.message.text + f"\n\n✅ <i>{status_msg}</i>", parse_mode="HTML")
+        await callback.answer(status_msg)
 
-        # Уведомляем пользователя об изменении его статуса
         try:
             if new_tier == 'vip':
-                await bot.send_message(chat_id=t_id, text="🎉 Поздравляем! Администратор выдал вам **VIP-статус**. Лимит устройств увеличен до 3!")
+                await bot.send_message(chat_id=t_id, text="🎉 Поздравляем! Администратор выдал вам **VIP-статус** (лимит устройств увеличен до 3).")
             else:
                 await bot.send_message(chat_id=t_id, text="ℹ️ Ваш статус был изменен администратором на **Free**.")
         except Exception:
             pass
 
-    @dp.callback_query(F.data.startswith("answer_"))
-    async def process_answer_button(callback: aiogram_types.CallbackQuery):
+    @dp.callback_query(F.data.startswith("delticket_"))
+    async def process_delete_ticket(callback: aiogram_types.CallbackQuery):
         if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
             return
+        ticket_id = callback.data.split("_")[1]
+        
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM support_tickets WHERE id = ?", (ticket_id,))
+        conn.commit()
+        conn.close()
 
+        await callback.message.delete()
+        await callback.answer("Тикет удален.")
+
+    @dp.callback_query(F.data.startswith("ans_"))
+    async def process_answer_click(callback: aiogram_types.CallbackQuery):
+        if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
+            return
+            
         target_id = callback.data.split("_")[1]
         admin_reply_targets[ADMIN_TELEGRAM_ID] = target_id
         
-        await callback.message.answer(f"✍️ Введите ответ для пользователя (ID: <code>{target_id}</code>) в следующем сообщении:", parse_mode="HTML")
+        await callback.message.answer(f"✍️ Напишите ответ для пользователя (ID: <code>{target_id}</code>) в следующем сообщении:", parse_mode="HTML")
         await callback.answer()
 
-    # Перехват текстовых сообщений администратора для ответа клиенту
+    # Перехват текста от админа для отправки клиенту
     @dp.message()
-    async def admin_text_handler(m: aiogram_types.Message):
+    async def admin_chat_handler(m: aiogram_types.Message):
         t_id = str(m.from_user.id)
         if t_id == ADMIN_TELEGRAM_ID and t_id in admin_reply_targets:
             target_user_id = admin_reply_targets.pop(t_id)
             try:
                 await bot.send_message(chat_id=target_user_id, text=f"💬 **Ответ от техподдержки:**\n\n{m.text}", parse_mode="Markdown")
-                await m.answer("✅ Ответ успешно отправлен пользователю!")
+                await m.answer("✅ Ответ успешно доставлен пользователю!")
             except Exception as e:
-                await m.answer(f"❌ Не удалось отправить сообщение пользователю: {e}")
+                await m.answer(f"❌ Ошибка отправки: {e}")
 
-    print("Main bot with Admin panel & Support started...")
+    print("Bot started with tickets and admin controls...")
     try:
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
