@@ -14,8 +14,7 @@ from google.genai.errors import APIError
 # Aiogram
 from aiogram import Bot, Dispatcher, F, types as aiogram_types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Update
 
 # --- БАЗА ДАННЫХ ---
 DB_FILE = "rubinov_ai.db"
@@ -55,7 +54,6 @@ init_db()
 # --- TELEGRAM БОТ ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
-# Укажи здесь точный URL твоего сайта на Render (без слэша на конце)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://rubinov-ai-dev.onrender.com")
 WEBHOOK_PATH = "/telegram-webhook"
 
@@ -68,7 +66,7 @@ async def lifespan(app: FastAPI):
     webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)
     yield
-    # Удаляем вебхук при выключении
+    # Удаляем вебхук и закрываем сессию при выключении
     await bot.delete_webhook()
     await bot.session.close()
 
@@ -81,13 +79,13 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# Регистрируем обработчик вебхуков aiogram для FastAPI
-webhook_requests_handler = SimpleRequestHandler(
-    dispatcher=dp,
-    bot=bot,
-)
-webhook_requests_handler.register(app, path=WEBHOOK_PATH)
-setup_application(app, dp, bot=bot)
+# Обработка вебхуков Telegram через FastAPI эндпоинт
+@app.post(WEBHOOK_PATH)
+async def bot_webhook(request: Request):
+    update_data = await request.json()
+    update = Update.model_validate(update_data, context={"bot": bot})
+    await dp.feed_update(bot, update)
+    return Response(status_code=200)
 
 
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
