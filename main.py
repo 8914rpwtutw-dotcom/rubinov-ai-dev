@@ -152,7 +152,7 @@ async def cmd_start(message: types.Message):
         reply_markup=get_main_keyboard(is_admin)
     )
 
-@dp.message(F.text.contains("Получить код"))
+@dp.message(F.text == "🔑 Получить код")
 async def btn_get_code(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
@@ -175,7 +175,7 @@ async def btn_get_code(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text.contains("🎫 Тикеты"))
+@dp.message(F.text == "🎫 Тикеты")
 async def btn_tickets(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
@@ -206,7 +206,7 @@ async def btn_tickets(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text.contains("Админ-панель"))
+@dp.message(F.text == "👑 Админ-панель")
 async def btn_admin_panel(message: types.Message):
     tg_id = str(message.from_user.id)
     if tg_id != str(ADMIN_ID): return
@@ -256,7 +256,9 @@ async def cmd_unvip(message: types.Message):
 async def cmd_reply(message: types.Message):
     if str(message.from_user.id) != str(ADMIN_ID): return
     parts = message.text.split(" ", 2)
-    if len(parts) < 3: return
+    if len(parts) < 3:
+        await message.answer("❌ Формат: /reply ID текст")
+        return
     try:
         await bot.send_message(int(parts[1]), f"💬 <b>Ответ поддержки:</b>\n{parts[2]}", parse_mode="HTML")
         await message.answer("✅ Ответ успешно отправлен пользователю.")
@@ -376,7 +378,7 @@ async def chat_endpoint(prompt: str = Form(""), file: Optional[UploadFile] = Fil
     mime_type = file.content_type if file else None
     return {"response": get_gemini_response(prompt, file_bytes, mime_type)}
 
-# ==================== СТАРЫЙ УНИКАЛЬНЫЙ ДИЗАЙН ИНТЕРФЕЙСА ====================
+# ==================== УНИКАЛЬНЫЙ ДИЗАЙН ИНТЕРФЕЙСА ====================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -424,7 +426,7 @@ HTML_TEMPLATE = """
             color: #fff; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer;
         }
 
-        /* Сайдбар */
+        /* Сайбар */
         aside {
             width: 280px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color);
             display: flex; flex-direction: column; padding: 16px; gap: 16px;
@@ -492,7 +494,7 @@ HTML_TEMPLATE = """
         </div>
         <button class="btn-new" onclick="newChat()">+ Новая беседа</button>
         <div class="chats-list" id="chats-list"></div>
-        <button onclick="logout()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:12px; text-align:left;">Выйти аккаунта</button>
+        <button onclick="logout()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:12px; text-align:left;">Выйти из аккаунта</button>
     </aside>
 
     <main>
