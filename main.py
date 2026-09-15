@@ -496,7 +496,9 @@ HTML_TEMPLATE = """
         #auth-screen { position: fixed; inset: 0; background: var(--bg-main); z-index: 1000; display: flex; justify-content: center; align-items: center; }
         .auth-card { background: rgba(18, 21, 31, 0.85); border: 1px solid rgba(168, 85, 247, 0.2); backdrop-filter: blur(24px); padding: 35px; border-radius: 24px; width: 90%; max-width: 400px; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.7); }
         .auth-card h2 { font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 10px; }
-        .auth-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 20px; }
+        .auth-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 15px; }
+        .bot-link { display: inline-block; margin-bottom: 20px; color: #a855f7; font-weight: 600; text-decoration: none; font-size: 13px; }
+        .bot-link:hover { text-decoration: underline; }
         .auth-input { width: 100%; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; color: #fff; font-size: 20px; text-align: center; letter-spacing: 6px; margin-bottom: 15px; outline: none; }
         .auth-btn { background: var(--accent-gradient); color: #fff; border: none; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer; width: 100%; font-size: 14px; }
         #ban-screen { position: fixed; inset: 0; background: rgba(4, 5, 8, 0.95); backdrop-filter: blur(15px); z-index: 2000; display: flex; justify-content: center; align-items: center; flex-direction: column; text-align: center; padding: 20px; }
@@ -556,6 +558,7 @@ HTML_TEMPLATE = """
         <div class="auth-card">
             <h2>Rubinov AI</h2>
             <p>Запустите Telegram-бота, получите код авторизации и введите его ниже.</p>
+            <a href="https://t.me/Rubinov_Ai_bot" target="_blank" class="bot-link">👉 Открыть Telegram-бот @Rubinov_Ai_bot</a>
             <input type="text" id="code-input" class="auth-input" placeholder="••••••" maxlength="6">
             <button class="auth-btn" onclick="verifyCode()">Войти в систему</button>
         </div>
@@ -947,10 +950,12 @@ HTML_TEMPLATE = """
 async def root():
     return HTML_TEMPLATE
 
-def run_telegram_bot():
-    asyncio.run(dp.start_polling(bot))
-
 if __name__ == "__main__":
     import uvicorn
-    threading.Thread(target=run_telegram_bot, daemon=True).start()
+    def start_bot():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(dp.start_polling(bot))
+
+    threading.Thread(target=start_bot, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
