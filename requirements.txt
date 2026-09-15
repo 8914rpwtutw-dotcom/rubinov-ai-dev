@@ -4,3 +4,4 @@ requests
 aiogram
 google-genai
 PyJWT
+python-multipart
