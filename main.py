@@ -1,9 +1,8 @@
 import os
 import time
 import random
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import hmac
+import hashlib
 from typing import Optional
 
 try:
@@ -29,12 +28,10 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# --- НАСТРОЙКИ ПОЧТЫ И БЕЗОПАСНОСТИ ---
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 465
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "8914rpwtutw@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "wavlkpsqxuoozyh")
+# --- НАСТРОЙКИ БЕЗОПАСНОСТИ И TELEGRAM ---
 JWT_SECRET = os.getenv("JWT_SECRET", "rubinov_super_secret_key_2026_secure")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+OWNER_TELEGRAM_ID = os.getenv("OWNER_TELEGRAM_ID", "")
 security = HTTPBearer()
 
 # --- БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ---
@@ -47,8 +44,8 @@ def init_db():
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE,
-                code TEXT,
+                telegram_id TEXT UNIQUE,
+                username TEXT,
                 is_vip INTEGER DEFAULT 0
             )
         ''')
@@ -59,73 +56,35 @@ def init_db():
 
 init_db()
 
-# --- ОТПРАВКА КОДА НА ПОЧТУ ---
-def send_otp_email(to_email: str, code: str):
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_EMAIL
-    msg['To'] = to_email
-    msg['Subject'] = 'Код подтверждения для Rubinov AI'
-    
-    body = f"""Приветствуем в Rubinov AI!
-    
-Ваш код для входа: {code}
-
-Код действителен в течение 5 минут. Если вы не запрашивали код, просто проигнорируйте это письмо."""
-    msg.attach(MIMEText(body, 'plain'))
-    
-    try:
-        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
-        server.quit()
-    except Exception as e:
-        print(f"Ошибка отправки почты: {e}")
-        raise HTTPException(status_code=500, detail="Не удалось отправить письмо на указанный email.")
-
 # --- ПРОВЕРКА JWT ТОКЕНА ---
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("user_id")
+        return payload.get("telegram_id")
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен авторизации.")
 
-# --- API АВТОРИЗАЦИИ ---
-@app.post("/api/auth/request-code")
-def request_code(email: str = Form(...)):
-    email = email.strip().lower()
-    if not email or "@" not in email:
-        raise HTTPException(status_code=400, detail="Некорректный email.")
-    
-    code = str(random.randint(100000, 999999))
+# --- API АВТОРИЗАЦИИ ЧЕРЕЗ TELEGRAM ---
+@app.post("/api/auth/telegram")
+def telegram_auth(telegram_id: str = Form(...), username: Optional[str] = Form("")):
+    telegram_id = telegram_id.strip()
+    if not telegram_id:
+        raise HTTPException(status_code=400, detail="Некорректный Telegram ID.")
     
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (email, code) VALUES (?, ?)", (email, code))
-    cursor.execute("UPDATE users SET code = ? WHERE email = ?", (code, email))
-    conn.commit()
-    conn.close()
-    
-    send_otp_email(email, code)
-    return {"status": "success", "message": "Код отправлен на почту."}
-
-@app.post("/api/auth/verify-code")
-def verify_code(email: str = Form(...), code: str = Form(...)):
-    email = email.strip().lower()
-    code = code.strip()
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE email = ? AND code = ?", (email, code))
+    cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,))
     user = cursor.fetchone()
-    conn.close()
     
     if not user:
-        raise HTTPException(status_code=400, detail="Неверный код подтверждения.")
+        cursor.execute("INSERT INTO users (telegram_id, username) VALUES (?, ?)", (telegram_id, username))
+        conn.commit()
     
-    user_id = user[0]
-    token = jwt.encode({"user_id": user_id, "email": email}, JWT_SECRET, algorithm="HS256")
+    conn.close()
+    
+    # Выдаем JWT токен сессии
+    token = jwt.encode({"telegram_id": telegram_id}, JWT_SECRET, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer"}
 
 # --- ЛОГИКА ИИ (GEMINI) ---
@@ -141,9 +100,6 @@ def get_api_keys():
         os.getenv("GEMINI_API_KEY")
     ]
     return [k.strip() for k in keys if k and k.strip()]
-
-def get_gemini_client(api_key: str):
-    return genai.Client(api_key=api_key)
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
     global current_key_idx, current_model_idx
@@ -187,7 +143,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
         active_model = MODELS[current_model_idx % num_models]
 
         try:
-            client = get_gemini_client(active_key)
+            client = genai.Client(api_key=active_key)
             response = client.models.generate_content(
                 model=active_model,
                 contents=contents
@@ -223,7 +179,7 @@ def health_check():
 async def chat_endpoint(
     prompt: str = Form(""),
     file: Optional[UploadFile] = File(None),
-    user_id: int = Depends(get_current_user)
+    telegram_id: str = Depends(get_current_user)
 ):
     if not prompt.strip() and not file:
         raise HTTPException(status_code=400, detail="Запрос или файл обязателен")
@@ -238,7 +194,7 @@ async def chat_endpoint(
     answer = get_gemini_response(prompt, file_bytes, mime_type)
     return {"response": answer}
 
-# --- ПОЛНЫЙ ИНТЕРФЕЙС СО ВХОДОМ ПО ПОЧТЕ ---
+# --- ИНТЕРФЕЙС С АВТОРИЗАЦИЕЙ ЧЕРЕЗ TELEGRAM ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -249,6 +205,7 @@ HTML_TEMPLATE = """
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         :root {
@@ -273,10 +230,10 @@ HTML_TEMPLATE = """
         html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); }
         body { display: flex; position: relative; }
 
-        /* МОДАЛЬНОЕ ОКНО АВТОРИЗАЦИИ */
+        /* МОДАЛЬНОЕ ОКНО TELEGRAM ВХОДА */
         #auth-modal {
             position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh;
-            background: rgba(4, 5, 8, 0.92); backdrop-filter: blur(25px);
+            background: rgba(4, 5, 8, 0.95); backdrop-filter: blur(25px);
             z-index: 1000; display: flex; align-items: center; justify-content: center;
             opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
         }
@@ -291,7 +248,7 @@ HTML_TEMPLATE = """
         .auth-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
         .auth-input {
             background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 14px; padding: 12px 16px; color: #fff; font-size: 14px; outline: none; width: 100%;
+            border-radius: 14px; padding: 12px 16px; color: #fff; font-size: 14px; outline: none; width: 100%; text-align: center;
         }
         .auth-input:focus { border-color: rgba(168, 85, 247, 0.5); }
         .auth-btn {
@@ -462,21 +419,12 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <!-- Модальное окно авторизации -->
+    <!-- Модальное окно входа через Telegram -->
     <div id="auth-modal">
         <div class="auth-card">
-            <h2>Вход в Rubinov AI</h2>
-            <p id="auth-desc">Введите вашу почту, чтобы получить защищенный код подтверждения.</p>
-            
-            <div id="step-email" style="display: flex; flex-direction: column; gap: 14px;">
-                <input type="email" id="user-email" class="auth-input" placeholder="name@example.com" />
-                <button class="auth-btn" onclick="requestOtp()">Получить код</button>
-            </div>
-
-            <div id="step-code" style="display: none; flex-direction: column; gap: 14px;">
-                <input type="text" id="user-code" class="auth-input" placeholder="Введите 6-значный код" maxlength="6" />
-                <button class="auth-btn" onclick="verifyOtp()">Войти в систему</button>
-            </div>
+            <h2>Авторизация</h2>
+            <p id="auth-desc">Подтвердите вход через ваш Telegram ID для доступа к Rubinov AI.</p>
+            <button class="auth-btn" onclick="loginWithTelegram()">Войти через Telegram</button>
         </div>
     </div>
 
@@ -498,7 +446,7 @@ HTML_TEMPLATE = """
             </svg>
             <div>
                 <h2>Rubinov AI</h2>
-                <span>Secure Edition</span>
+                <span>Telegram Edition</span>
             </div>
         </div>
 
@@ -558,13 +506,20 @@ HTML_TEMPLATE = """
 
     <script>
         let token = localStorage.getItem('rubinov_token');
-        let chats = JSON.parse(localStorage.getItem('rubinov_chats_main_v1') || '[]');
-        let currentChatId = localStorage.getItem('rubinov_active_chat_main_v1') || null;
+        let chats = JSON.parse(localStorage.getItem('rubinov_chats_tg_v1') || '[]');
+        let currentChatId = localStorage.getItem('rubinov_active_chat_tg_v1') || null;
         let selectedFile = null;
         let activeController = null;
         let isGenerating = false;
 
-        function checkAuth() {
+        async function checkAuth() {
+            // Если запущено внутри Telegram Mini App
+            if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initDataUnsafe && window.Telegram.WebApp.initDataUnsafe.user) {
+                const tgUser = window.Telegram.WebApp.initDataUnsafe.user;
+                await authenticateTelegramUser(tgUser.id.toString(), tgUser.username || tgUser.first_name);
+                return;
+            }
+
             if (!token) {
                 document.getElementById('auth-modal').classList.add('active');
             } else {
@@ -572,43 +527,32 @@ HTML_TEMPLATE = """
             }
         }
 
-        async function requestOtp() {
-            const email = document.getElementById('user-email').value.trim();
-            if (!email) return alert('Введите email');
-            
-            const res = await fetch('/api/auth/request-code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ email })
-            });
-            
-            if (res.ok) {
-                document.getElementById('step-email').style.display = 'none';
-                document.getElementById('step-code').style.display = 'flex';
-                document.getElementById('auth-desc').textContent = 'Код отправлен на почту. Проверьте входящие (и спам).';
-            } else {
-                alert('Ошибка отправки кода');
+        async function authenticateTelegramUser(telegramId, username) {
+            try {
+                const res = await fetch('/api/auth/telegram', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({ telegram_id: telegramId, username: username })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    localStorage.setItem('rubinov_token', data.access_token);
+                    token = data.access_token;
+                    document.getElementById('auth-modal').classList.remove('active');
+                } else {
+                    alert('Ошибка авторизации Telegram');
+                }
+            } catch (e) {
+                console.error(e);
             }
         }
 
-        async function verifyOtp() {
-            const email = document.getElementById('user-email').value.trim();
-            const code = document.getElementById('user-code').value.trim();
-            
-            const res = await fetch('/api/auth/verify-code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ email, code })
-            });
-            
-            const data = await res.json();
-            if (res.ok) {
-                localStorage.setItem('rubinov_token', data.access_token);
-                token = data.access_token;
-                checkAuth();
-            } else {
-                alert(data.detail || 'Неверный код');
-            }
+        // Тестовый вход для браузера (если открыли не в телеграме, но есть свой ID)
+        async function loginWithTelegram() {
+            let tgId = prompt("Введите ваш Telegram ID:");
+            if (!tgId) return;
+            await authenticateTelegramUser(tgId.trim(), "WebUser");
+            location.reload();
         }
 
         if (chats.length === 0) {
@@ -621,8 +565,8 @@ HTML_TEMPLATE = """
         }
 
         function saveState() {
-            localStorage.setItem('rubinov_chats_main_v1', JSON.stringify(chats));
-            localStorage.setItem('rubinov_active_chat_main_v1', currentChatId);
+            localStorage.setItem('rubinov_chats_tg_v1', JSON.stringify(chats));
+            localStorage.setItem('rubinov_active_chat_tg_v1', currentChatId);
             renderChats();
         }
 
