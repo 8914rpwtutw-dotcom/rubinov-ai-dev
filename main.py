@@ -5,15 +5,20 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
-from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-import jwt
-import sqlite3
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
+
+try:
+    from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Depends
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import HTMLResponse
+    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+    import jwt
+    import sqlite3
+    from google import genai
+    from google.genai import types
+    from google.genai.errors import APIError
+except Exception as e:
+    print(f"CRITICAL IMPORT ERROR: {e}")
+    raise e
 
 app = FastAPI()
 
@@ -36,18 +41,21 @@ security = HTTPBearer()
 DB_NAME = "rubinov_users.db"
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            code TEXT,
-            is_vip INTEGER DEFAULT 0
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE,
+                code TEXT,
+                is_vip INTEGER DEFAULT 0
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"DB Init Error: {e}")
 
 init_db()
 
