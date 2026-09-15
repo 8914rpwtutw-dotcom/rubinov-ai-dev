@@ -17,6 +17,7 @@ try:
     from google.genai.errors import APIError
     from aiogram import Bot, Dispatcher, F, types as aiogram_types
     from aiogram.filters import Command
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
 except Exception as e:
     print(f"CRITICAL IMPORT ERROR: {e}")
     raise e
@@ -32,14 +33,14 @@ app.add_middleware(
 
 JWT_SECRET = os.getenv("JWT_SECRET", "rubinov_super_secret_key_2026_secure")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-security = HTTPBearer()
+ADMIN_TELEGRAM_ID = str(os.getenv("ADMIN_TELEGRAM_ID", "")) # Ваш числовой Telegram ID для админ-панели в боте
 
+security = HTTPBearer()
 DB_NAME = "rubinov_secure.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Таблица пользователей с поддержкой статуса (tier: free / vip)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id TEXT PRIMARY KEY,
@@ -47,7 +48,6 @@ def init_db():
             tier TEXT DEFAULT 'free'
         )
     ''')
-    # Таблица временных одноразовых кодов для входа
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS login_codes (
             code TEXT PRIMARY KEY,
@@ -55,7 +55,6 @@ def init_db():
             expires_at REAL
         )
     ''')
-    # Таблица активных сессий (для контроля лимита устройств)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_sessions (
             telegram_id TEXT,
@@ -75,7 +74,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен авторизации.")
 
-# --- ЭНДПОИНТ ПРОВЕРКИ КОДА ВХОДА И ЛИМИТОВ УСТРОЙСТВ ---
 @app.post("/api/auth/verify-code")
 def verify_login_code(code: str = Form(...)):
     code = code.strip()
@@ -90,399 +88,169 @@ def verify_login_code(code: str = Form(...)):
         raise HTTPException(status_code=400, detail="Неверный или несуществующий код.")
     
     telegram_id, expires_at = row
-    
     if time.time() > expires_at:
         cursor.execute("DELETE FROM login_codes WHERE code = ?", (code,))
         conn.commit()
         conn.close()
-        raise HTTPException(status_code=400, detail="Срок действия кода истек. Запросите новый в боте.")
+        raise HTTPException(status_code=400, detail="Срок действия кода истек.")
     
-    # Проверяем статус пользователя (free или vip)
     cursor.execute("SELECT tier FROM users WHERE telegram_id = ?", (telegram_id,))
     user_row = cursor.fetchone()
     tier = user_row[0] if user_row else 'free'
     
-    # Проверяем сколько у пользователя уже активных сессий
     cursor.execute("SELECT COUNT(*) FROM user_sessions WHERE telegram_id = ?", (telegram_id,))
     active_sessions_count = cursor.fetchone()[0]
     
-    # Устанавливаем лимиты: free — 1 устройство, vip — до 3 устройств
+    # Лимиты: Free — 1 устройство, VIP — до 3 устройств
     max_devices = 3 if tier == 'vip' else 1
     
     if active_sessions_count >= max_devices:
         conn.close()
         raise HTTPException(
             status_code=403, 
-            detail=f"Превышен лимит устройств ({max_devices} для вашего тарифа). Выйдите с других устройств или купите VIP."
+            detail=f"Превышен лимит устройств ({max_devices} для вашего тарифа)."
         )
     
-    # Удаляем использованный код
     cursor.execute("DELETE FROM login_codes WHERE code = ?", (code,))
-    
-    # Создаем новую сессию
     session_id = str(random.randint(10000000, 99999999))
     cursor.execute("INSERT INTO user_sessions (telegram_id, session_id) VALUES (?, ?)", (telegram_id, session_id))
     
     conn.commit()
     conn.close()
     
-    # Выдаем JWT токен сессии
     token = jwt.encode({"telegram_id": telegram_id, "session_id": session_id}, JWT_SECRET, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer"}
 
-# --- АДМИН-ПАНЕЛЬ: ПРОСМОТР ПОЛЬЗОВАТЕЛЕЙ ---
-@app.get("/api/admin/users")
-def get_all_users():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT telegram_id, username, tier FROM users")
-    rows = cursor.fetchall()
-    
-    users_list = []
-    for r in rows:
-        t_id = r[0]
-        cursor.execute("SELECT COUNT(*) FROM user_sessions WHERE telegram_id = ?", (t_id,))
-        sessions_count = cursor.fetchone()[0]
-        users_list.append({
-            "telegram_id": t_id,
-            "username": r[1],
-            "tier": r[2],
-            "active_devices": sessions_count
-        })
-        
-    conn.close()
-    return {"total_users": len(users_list), "users": users_list}
-
-
-# --- ЛОГИКА ИИ (GEMINI) ---
+# --- ЛОГИКА ИИ ---
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
 current_key_idx = 0
 current_model_idx = 0
 
 def get_api_keys():
-    keys = [
-        os.getenv("GEMINI_KEY_1"),
-        os.getenv("GEMINI_KEY_2"),
-        os.getenv("GEMINI_KEY_3"),
-        os.getenv("GEMINI_API_KEY")
-    ]
+    keys = [os.getenv("GEMINI_KEY_1"), os.getenv("GEMINI_KEY_2"), os.getenv("GEMINI_KEY_3"), os.getenv("GEMINI_API_KEY")]
     return [k.strip() for k in keys if k and k.strip()]
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
     global current_key_idx, current_model_idx
-    
     lowered = prompt.lower()
+    
     if "нарисуй" in lowered or "draw" in lowered or "сгенерируй" in lowered:
-        clean_prompt = prompt.replace("Нарисуй:", "").replace("нарисуй", "").replace("сгенерируй", "").strip()
-        if not clean_prompt:
-            clean_prompt = "beautiful futuristic neon cyberpunk landscape"
-        
+        clean_prompt = prompt.replace("Нарисуй:", "").replace("нарисуй", "").replace("сгенерируй", "").strip() or "cyberpunk landscape"
         encoded_prompt = urllib.parse.quote(clean_prompt)
         img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-        
-        return f"""Вот ваше сгенерированное изображение по запросу: *"{clean_prompt}"*
+        return f"""Вот ваше сгенерированное изображение: *"{clean_prompt}"*
 
 <div style="margin-top:14px;">
-    <img src="{img_url}" alt="{clean_prompt}" style="max-width:100%; border-radius:16px; display:block; margin-bottom:12px; box-shadow: 0 12px 40px rgba(99, 102, 241, 0.2); border: 1px solid rgba(255,255,255,0.08);" />
-    <a href="{img_url}" target="_blank" download="rubinov_ai.jpg" style="display:inline-flex; align-items: center; gap: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:600; box-shadow: 0 4px 20px rgba(99, 102, 241, 0.35);">📥 Скачать в высоком разрешении</a>
+    <img src="{img_url}" alt="{clean_prompt}" style="max-width:100%; border-radius:16px; display:block; margin-bottom:12px;" />
+    <a href="{img_url}" target="_blank" download="image.jpg" style="display:inline-flex; align-items: center; gap: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:600;">📥 Скачать</a>
 </div>"""
 
     api_keys = get_api_keys()
     if not api_keys:
-        raise HTTPException(status_code=500, detail="API-ключи не найдены в Environment Variables.")
+        raise HTTPException(status_code=500, detail="API-ключи не найдены.")
 
-    num_keys = len(api_keys)
-    num_models = len(MODELS)
-    total_attempts = num_keys * num_models * 2
-
+    num_keys, num_models = len(api_keys), len(MODELS)
     contents = []
     if file_bytes and mime_type:
         contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
     if prompt:
         contents.append(prompt)
 
-    for _ in range(total_attempts):
+    for _ in range(num_keys * num_models * 2):
         active_key = api_keys[current_key_idx % num_keys]
         active_model = MODELS[current_model_idx % num_models]
-
         try:
             client = genai.Client(api_key=active_key)
             response = client.models.generate_content(model=active_model, contents=contents)
             return response.text
-        except APIError as e:
-            if e.code in [503, 429] or "RESOURCE_EXHAUSTED" in str(e) or "UNAVAILABLE" in str(e):
-                current_model_idx += 1
-                if current_model_idx >= num_models:
-                    current_model_idx = 0
-                    current_key_idx = (current_key_idx + 1) % num_keys
-                time.sleep(0.5)
-                continue
-            else:
-                break
         except Exception:
-            break
+            current_model_idx = (current_model_idx + 1) % num_models
+            continue
 
-    raise HTTPException(status_code=500, detail="Сервис ИИ перегружен. Повторите попытку.")
+    raise HTTPException(status_code=500, detail="Сервис ИИ перегружен.")
 
 @app.post("/api/chat")
-async def chat_endpoint(
-    prompt: str = Form(""),
-    file: Optional[UploadFile] = File(None),
-    telegram_id: str = Depends(get_current_user)
-):
-    if not prompt.strip() and not file:
-        raise HTTPException(status_code=400, detail="Запрос или файл обязателен")
-    
+async def chat_endpoint(prompt: str = Form(""), file: Optional[UploadFile] = File(None), telegram_id: str = Depends(get_current_user)):
     file_bytes = await file.read() if file else None
     mime_type = file.content_type if file else None
-
     answer = get_gemini_response(prompt, file_bytes, mime_type)
     return {"response": answer}
 
-
-# --- ФРОНТЕНД САЙТА С ОКНОМ ВВОДА КОДА ---
+# --- ФРОНТЕНД САЙТА ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rubinov AI</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        :root {
-            --bg-main: #040508;
-            --bg-sidebar: rgba(10, 12, 18, 0.65);
-            --border-color: rgba(255, 255, 255, 0.05);
-            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-            --text-main: #f1f5f9;
-            --text-muted: #94a3b8;
-            --user-msg-bg: linear-gradient(135deg, rgba(99, 102, 241, 0.16) 0%, rgba(168, 85, 247, 0.14) 100%);
-            --bot-msg-bg: rgba(15, 18, 26, 0.65);
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
-        html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); display: flex; }
-
-        /* МОДАЛЬНОЕ ОКНО ВХОДА ПО КОДУ */
-        #auth-modal {
-            position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh;
-            background: rgba(4, 5, 8, 0.96); backdrop-filter: blur(25px);
-            z-index: 1000; display: flex; align-items: center; justify-content: center;
-            opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
-        }
+        :root { --bg-main: #040508; --accent: linear-gradient(135deg, #6366f1, #a855f7); }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+        body { height: 100dvh; background: var(--bg-main); color: #f1f5f9; display: flex; }
+        #auth-modal { position: fixed; inset: 0; background: rgba(4,5,8,0.95); z-index: 1000; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: 0.3s; }
         #auth-modal.active { opacity: 1; pointer-events: auto; }
-        .auth-card {
-            background: rgba(18, 21, 31, 0.95); border: 1px solid rgba(168, 85, 247, 0.3);
-            border-radius: 24px; padding: 32px; width: 90%; max-width: 400px;
-            display: flex; flex-direction: column; gap: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.8);
-            text-align: center; color: #fff;
-        }
-        .auth-card h2 { font-size: 20px; font-weight: 700; }
-        .auth-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
-        .auth-input {
-            background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 14px; padding: 12px 16px; color: #fff; font-size: 18px; outline: none; width: 100%; text-align: center; letter-spacing: 4px; font-weight: 700;
-        }
-        .auth-input:focus { border-color: rgba(168, 85, 247, 0.5); }
-        .auth-btn {
-            background: var(--accent-gradient); color: #fff; border: none; border-radius: 14px;
-            padding: 12px; font-size: 14px; font-weight: 600; cursor: pointer; transition: 0.2s;
-            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
-        }
-        .auth-btn:hover { transform: translateY(-1px); }
-        .bot-link-hint { font-size: 12px; color: #a855f7; text-decoration: none; margin-top: 4px; display: inline-block; }
-
-        /* ИНТЕРФЕЙС САЙТА */
-        #sidebar { width: 280px; min-width: 280px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 20px 14px; height: 100dvh; }
-        .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
-        .brand h2 { font-size: 15px; font-weight: 700; color: #fff; }
-        .brand span { font-size: 10px; color: var(--text-muted); }
-        .btn-new-chat { background: var(--accent-gradient); color: #fff; border: none; padding: 11px 16px; border-radius: 14px; font-size: 12px; font-weight: 600; cursor: pointer; margin-bottom: 18px; }
-        #chats-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-        .chat-item { background: rgba(255,255,255,0.015); border: 1px solid var(--border-color); border-radius: 12px; padding: 10px 12px; font-size: 12px; color: #cbd5e1; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
-        .chat-item.active { background: rgba(168, 85, 247, 0.1); border-color: rgba(168, 85, 247, 0.35); color: #fff; }
-        
-        #main { flex: 1; display: flex; flex-direction: column; background: var(--bg-main); height: 100dvh; position: relative; }
-        #chat-header { height: 60px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; padding: 0 24px; font-weight: 600; font-size: 14px; }
-        #chat-container { flex: 1; overflow-y: auto; padding: 24px 24px 140px 24px; display: flex; flex-direction: column; gap: 22px; max-width: 900px; width: 100%; margin: 0 auto; }
-        
-        .msg-row { display: flex; flex-direction: column; width: 100%; }
-        .msg-row.user-row { align-items: flex-end; }
-        .msg-row.bot-row { align-items: flex-start; }
-        .msg-user { background: var(--user-msg-bg); color: #fff; border: 1px solid rgba(168, 85, 247, 0.22); border-radius: 18px 18px 4px 18px; padding: 13px 18px; font-size: 13.5px; max-width: 85%; }
-        .msg-bot { background: var(--bot-msg-bg); border: 1px solid var(--border-color); color: #e2e8f0; border-radius: 18px 18px 18px 4px; padding: 18px 22px; font-size: 13.5px; max-width: 90%; }
-        
-        #input-wrapper { position: absolute; bottom: 0; left: 0; right: 0; padding: 16px 24px; background: linear-gradient(180deg, transparent, var(--bg-main) 40%); }
-        #input-container { max-width: 900px; margin: 0 auto; background: rgba(13, 16, 24, 0.8); border: 1px solid rgba(168, 85, 247, 0.18); border-radius: 20px; padding: 8px 12px; display: flex; gap: 8px; align-items: center; }
-        #prompt-input { flex: 1; background: transparent; border: none; color: #fff; font-size: 14px; outline: none; padding: 6px; }
-        .btn-action { background: var(--accent-gradient); color: #fff; border: none; border-radius: 12px; padding: 11px 20px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+        .auth-card { background: #12151f; border: 1px solid rgba(168,85,247,0.3); border-radius: 24px; padding: 32px; width: 90%; max-width: 400px; text-align: center; }
+        .auth-input { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 12px; color: #fff; font-size: 18px; width: 100%; text-align: center; letter-spacing: 4px; margin: 16px 0; outline: none; }
+        .auth-btn { background: var(--accent); color: #fff; border: none; border-radius: 14px; padding: 12px; font-weight: 600; width: 100%; cursor: pointer; }
+        #main { flex: 1; display: flex; flex-direction: column; height: 100dvh; }
+        #chat-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 800px; width: 100%; margin: 0 auto; }
+        .msg { padding: 14px 18px; border-radius: 16px; max-width: 85%; font-size: 14px; line-height: 1.5; }
+        .user-msg { background: rgba(99,102,241,0.2); align-self: flex-end; }
+        .bot-msg { background: #0f121a; border: 1px solid rgba(255,255,255,0.05); align-self: flex-start; }
+        #input-box { padding: 20px; max-width: 800px; width: 100%; margin: 0 auto; display: flex; gap: 10px; }
+        #prompt-input { flex: 1; background: #0d1018; border: 1px solid rgba(255,255,255,0.1); border-radius: 14px; padding: 12px; color: #fff; outline: none; }
+        .send-btn { background: var(--accent); color: #fff; border: none; padding: 0 20px; border-radius: 14px; font-weight: 600; cursor: pointer; }
     </style>
 </head>
 <body>
-    <!-- Модальное окно авторизации по коду -->
     <div id="auth-modal" class="active">
         <div class="auth-card">
-            <h2>Авторизация в Rubinov AI</h2>
-            <p>Напишите нашему боту в Telegram команду <b>/login</b>, чтобы получить одноразовый код подтверждения.</p>
+            <h2>Авторизация</h2>
+            <p style="font-size: 13px; color: #94a3b8; margin-top: 8px;">Запросите код в нашем Telegram-боте командой /login</p>
             <input type="text" id="code-input" class="auth-input" placeholder="000000" maxlength="6">
             <button class="auth-btn" onclick="submitCode()">Войти</button>
-            <a href="https://t.me/" target="_blank" class="bot-link-hint" id="bot-link">Открыть Telegram-бота</a>
         </div>
     </div>
-
-    <div id="sidebar">
-        <div class="brand">
-            <div><h2>Rubinov AI</h2><span>Secure Auth Edition</span></div>
-        </div>
-        <button class="btn-new-chat" onclick="createNewChat()">+ Новый диалог</button>
-        <div id="chats-list"></div>
-    </div>
-
     <div id="main">
-        <div id="chat-header"><span id="current-chat-title">Новый чат 1</span></div>
         <div id="chat-container"></div>
-        <div id="input-wrapper">
-            <div id="input-container">
-                <input type="text" id="prompt-input" placeholder="Введите сообщение или попросите нарисовать..." onkeydown="if(event.key==='Enter') sendMessage()" />
-                <button class="btn-action" onclick="sendMessage()">Отправить</button>
-            </div>
+        <div id="input-box">
+            <input type="text" id="prompt-input" placeholder="Введите сообщение или попросите нарисовать..." onkeydown="if(event.key==='Enter')sendMessage()">
+            <button class="send-btn" onclick="sendMessage()">Отправить</button>
         </div>
     </div>
-
     <script>
-        let token = localStorage.getItem('rubinov_token');
-        let chats = JSON.parse(localStorage.getItem('rubinov_chats') || '[]');
-        let currentChatId = localStorage.getItem('rubinov_active_chat') || null;
-
-        if (token) {
-            document.getElementById('auth-modal').classList.remove('active');
-        }
+        let token = localStorage.getItem('token');
+        if (token) document.getElementById('auth-modal').classList.remove('active');
 
         async function submitCode() {
             const code = document.getElementById('code-input').value.trim();
-            if (!code) return alert('Введите код!');
-
-            try {
-                const res = await fetch('/api/auth/verify-code', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: new URLSearchParams({ code: code })
-                });
-                const data = await res.json();
-                if (res.ok) {
-                    localStorage.setItem('rubinov_token', data.access_token);
-                    token = data.access_token;
-                    document.getElementById('auth-modal').classList.remove('active');
-                } else {
-                    alert(data.detail || 'Неверный код');
-                }
-            } catch (e) {
-                alert('Ошибка соединения с сервером');
-            }
-        }
-
-        if (chats.length === 0) {
-            const initial = { id: Date.now().toString(), name: 'Новый чат 1', messages: [] };
-            chats.push(initial);
-            currentChatId = initial.id;
-            saveState();
-        }
-
-        function saveState() {
-            localStorage.setItem('rubinov_chats', JSON.stringify(chats));
-            localStorage.setItem('rubinov_active_chat', currentChatId);
-            renderChats();
-        }
-
-        function renderChats() {
-            const list = document.getElementById('chats-list');
-            list.innerHTML = '';
-            chats.forEach(chat => {
-                const item = document.createElement('div');
-                item.className = `chat-item ${chat.id === currentChatId ? 'active' : ''}`;
-                item.textContent = chat.name;
-                item.onclick = () => { currentChatId = chat.id; saveState(); };
-                list.appendChild(item);
-            });
-            const active = chats.find(c => c.id === currentChatId);
-            if (active) {
-                document.getElementById('current-chat-title').textContent = active.name;
-                renderMessages(active.messages);
-            }
-        }
-
-        function createNewChat() {
-            if (chats.length >= 5) return alert('Максимум 5 чатов!');
-            const newChat = { id: Date.now().toString(), name: `Новый чат ${chats.length + 1}`, messages: [] };
-            chats.push(newChat);
-            currentChatId = newChat.id;
-            saveState();
-        }
-
-        function renderMessages(messages) {
-            const container = document.getElementById('chat-container');
-            container.innerHTML = '';
-            messages.forEach(msg => {
-                const row = document.createElement('div');
-                row.className = `msg-row ${msg.role === 'user' ? 'user-row' : 'bot-row'}`;
-                const box = document.createElement('div');
-                box.className = msg.role === 'user' ? 'msg-user' : 'msg-bot';
-                if (msg.role === 'bot' && msg.text.includes('<img')) {
-                    box.innerHTML = msg.text;
-                } else {
-                    box.innerHTML = msg.role === 'bot' ? marked.parse(msg.text) : escapeHtml(msg.text);
-                }
-                row.appendChild(box);
-                container.appendChild(row);
-            });
-            container.scrollTop = container.scrollHeight;
+            const res = await fetch('/api/auth/verify-code', { method: 'POST', body: new URLSearchParams({ code }) });
+            const data = await res.json();
+            if (res.ok) { localStorage.setItem('token', data.access_token); location.reload(); }
+            else alert(data.detail);
         }
 
         async function sendMessage() {
             const input = document.getElementById('prompt-input');
             const text = input.value.trim();
             if (!text) return;
-
-            const activeChat = chats.find(c => c.id === currentChatId);
-            activeChat.messages.push({ role: 'user', text: text });
-            if (activeChat.messages.length === 1) activeChat.name = text.slice(0, 18);
-            renderMessages(activeChat.messages);
+            
+            const container = document.getElementById('chat-container');
+            container.innerHTML += `<div class="msg user-msg">${text}</div>`;
             input.value = '';
 
-            const formData = new FormData();
-            formData.append('prompt', text);
-
-            try {
-                const res = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + token },
-                    body: formData
-                });
-                const data = await res.json();
-                if (res.ok) {
-                    activeChat.messages.push({ role: 'bot', text: data.response });
-                } else {
-                    if (res.status === 401) {
-                        localStorage.removeItem('rubinov_token');
-                        location.reload();
-                    } else {
-                        activeChat.messages.push({ role: 'bot', text: 'Ошибка: ' + data.detail });
-                    }
-                }
-            } catch (e) {
-                activeChat.messages.push({ role: 'bot', text: 'Ошибка соединения.' });
+            const res = await fetch('/api/chat', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token }, body: new URLSearchParams({ prompt: text }) });
+            const data = await res.json();
+            if (res.ok) {
+                container.innerHTML += `<div class="msg bot-msg">${marked.parse(data.response)}</div>`;
+            } else {
+                container.innerHTML += `<div class="msg bot-msg" style="color:#f87171">Ошибка: ${data.detail}</div>`;
             }
-            saveState();
+            container.scrollTop = container.scrollHeight;
         }
-
-        function escapeHtml(text) {
-            return (text || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
-
-        renderChats();
     </script>
 </body>
 </html>
@@ -493,78 +261,185 @@ async def get_root():
     return HTML_TEMPLATE
 
 
-# --- АСИНХРОННЫЙ ЗАПУСК TELEGRAM-БОТА С КОМАНДАМИ /login И /buy ---
+# --- TELEGRAM БОТ С ПАНЕЛЬЮ АДМИНА, ПОДДЕРЖКОЙ И УПРАВЛЕНИЕМ ВИП ---
 @app.on_event("startup")
 async def on_startup():
-    async def run_bot():
-        if not TELEGRAM_BOT_TOKEN:
-            print("Telegram bot token not found, bot disabled.")
-            return
+    if not TELEGRAM_BOT_TOKEN:
+        return
         
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        dp = Dispatcher()
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    dp = Dispatcher()
 
-        @dp.message(Command("start"))
-        async def cmd_start(message: aiogram_types.Message):
-            await message.answer(
-                "👋 Привет! Я бот-помощник **Rubinov AI**.\n\n"
+    # Состояние диалога с поддержкой в памяти (чтобы админ мог ответить пользователю)
+    # Ключ: admin_telegram_id, Значение: target_user_telegram_id
+    admin_reply_targets = {}
+
+    @dp.message(Command("start"))
+    async def cmd_start(m: aiogram_types.Message):
+        t_id = str(m.from_user.id)
+        uname = m.from_user.username or m.from_user.first_name
+        
+        # Регистрируем пользователя при старте
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (t_id, uname))
+        conn.commit()
+        conn.close()
+
+        if t_id == ADMIN_TELEGRAM_ID:
+            await m.answer(
+                "👑 **Панель Администратора Rubinov AI**\n\n"
+                "📌 **Команды управления:**\n"
+                "👥 /users — список всех пользователей (с возможностью выдать/забрать VIP)\n"
+                "🛠️ Поддержка: просто нажмите «Ответить» на пересланное сообщение пользователя."
+            )
+        else:
+            await m.answer(
+                "👋 Добро пожаловать в **Rubinov AI**!\n\n"
                 "📌 **Доступные команды:**\n"
-                "👉 /login — получить код для входа на сайт (Лимит: 1 активное устройство для Free)\n"
-                "⭐ /buy — купить VIP статус (До 3 устройств и расширенные лимиты)"
+                "👉 /login — получить код для входа на сайт\n"
+                "🆘 /support [текст] — написать в техническую поддержку"
             )
 
-        @dp.message(Command("login"))
-        async def cmd_login(message: aiogram_types.Message):
-            telegram_id = str(message.from_user.id)
-            username = message.from_user.username or message.from_user.first_name
-            
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (telegram_id, username))
-            conn.commit()
-            conn.close()
-            
-            code = str(random.randint(100000, 999999))
-            expires_at = time.time() + 60  # 1 минута
-            
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO login_codes (code, telegram_id, expires_at) VALUES (?, ?, ?)", (code, telegram_id, expires_at))
-            conn.commit()
-            conn.close()
-            
-            await message.answer(
-                f"🔐 Ваш одноразовый код для входа на сайт:\n\n`{code}`\n\n"
-                "⚠️ *Код действителен в течение 1 минуты.* Введите его на сайте для авторизации.",
-                parse_mode="Markdown"
-            )
+    @dp.message(Command("login"))
+    async def cmd_login(m: aiogram_types.Message):
+        t_id = str(m.from_user.id)
+        uname = m.from_user.username or m.from_user.first_name
+        
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (t_id, uname))
+        conn.commit()
+        
+        code = str(random.randint(100000, 999999))
+        cursor.execute("INSERT OR REPLACE INTO login_codes (code, telegram_id, expires_at) VALUES (?, ?, ?)", (code, t_id, time.time() + 60))
+        conn.commit()
+        conn.close()
+        
+        await m.answer(f"🔐 Ваш код для входа на сайт:\n\n`{code}`\n\n⚠️ *Действителен 1 минуту.*", parse_mode="Markdown")
 
-        @dp.message(Command("buy"))
-        async def cmd_buy(message: aiogram_types.Message):
-            telegram_id = str(message.from_user.id)
+    @dp.message(Command("support"))
+    async def cmd_support(m: aiogram_types.Message):
+        t_id = str(m.from_user.id)
+        text_parts = m.text.split(maxsplit=1)
+        
+        if len(text_parts) < 2:
+            await m.answer("⚠️ Напишите ваш вопрос вместе с командой. Пример:\n`/support Не могу войти на сайт`", parse_mode="Markdown")
+            return
             
-            # Временная симуляция успешной покупки VIP (позже заменим на платежный шлюз)
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute("UPDATE users SET tier = 'vip' WHERE telegram_id = ?", (telegram_id,))
-            conn.commit()
-            conn.close()
-            
-            await message.answer(
-                "⭐ **Поздравляем! Вам успешно подключен VIP-статус.**\n\n"
-                "Теперь вы можете авторизоваться на **до 3 устройствах** одновременно! Используйте /login для получения кода."
-            )
+        support_text = text_parts[1]
+        
+        if not ADMIN_TELEGRAM_ID:
+            await m.answer("❌ Администратор еще не настроен в системе.")
+            return
 
-        print("Telegram bot polling started...")
+        # Пересылаем сообщение администратору с кнопкой для ответа
+        user_mention = f"@{m.from_user.username}" if m.from_user.username else m.from_user.first_name
+        msg_to_admin = (
+            f"🆘 **Новое обращение в поддержку!**\n\n"
+            f"👤 Пользователь: {user_mention}\n"
+            f"🆔 ID: `{t_id}`\n\n"
+            f"💬 Текст: {support_text}"
+        )
+        
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✍️ Ответить пользователю", callback_data=f"answer_{t_id}")
+
+        await bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=msg_to_admin, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        await m.answer("✅ Ваше сообщение успешно отправлено в поддержку! Ожидайте ответа.")
+
+    # --- АДМИНСКАЯ КОМАНДА ДЛЯ ПРОСМОТРА ПОЛЬЗОВАТЕЛЕЙ ---
+    @dp.message(Command("users"))
+    async def cmd_admin_users(m: aiogram_types.Message):
+        if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
+            return
+
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT telegram_id, username, tier FROM users")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+        def format_user_list(rows):
+            return "📭 База данных пользователей пуста."
+
+        text = f"📊 **Всего зарегистрировано:** {len(rows)} чел.\n\n"
+        for r in rows:
+            t_id, uname, tier = r[0], r[1] or "Без имени", r[2]
+            status_icon = "⭐ VIP" else "👤 Free"
+            text += f"• <b>{uname}</b> (ID: <code>{t_id}</code>) — {status_icon}\n"
+
+        await m.answer(text, parse_mode="HTML")
+
+        # Отправляем карточки управления для каждого пользователя
+        for r in rows:
+            t_id, uname, tier = r[0], r[1] or "Без имени", r[2]
+            builder = InlineKeyboardBuilder()
+            if tier == 'free':
+                builder.button(text="⭐ Выдать VIP", callback_data=f"setvip_{t_id}")
+            else:
+                builder.button(text="❌ Забрать VIP (в Free)", callback_data=f"setfree_{t_id}")
+
+            await m.answer(f"👤 <b>{uname}</b>\nID: <code>{t_id}</code>\nСтатус: <b>{tier.upper()}</b>", reply_markup=builder.as_markup(), parse_mode="HTML")
+
+    # --- ОБРАБОТКА КНОПОК АДМИНА (ВЫДАЧА/СНЯТИЕ VIP И ОТВЕТЫ) ---
+    @dp.callback_query(F.data.startswith("setvip_") | F.data.startswith("setfree_"))
+    async def process_tier_change(callback: aiogram_types.CallbackQuery):
+        if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
+            return await callback.answer("У вас нет прав.", show_alert=True)
+
+        action, t_id = callback.data.split("_")
+        new_tier = 'vip' if action == 'setvip' else 'free'
+
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET tier = ? WHERE telegram_id = ?", (new_tier, t_id))
+        conn.commit()
+        conn.close()
+
+        status_text = "⭐ VIP-статус выдан!" if new_tier == 'vip' else "👤 Статус изменен на Free."
+        await callback.message.edit_text(callback.message.text + f"\n\n✅ <i>Изменено: {status_text}</i>", parse_mode="HTML")
+        await callback.answer(status_text)
+
+        # Уведомляем пользователя об изменении его статуса
         try:
-            await dp.start_polling(bot, skip_updates=True)
-        except Exception as e:
-            print(f"Bot polling error: {e}")
+            if new_tier == 'vip':
+                await bot.send_message(chat_id=t_id, text="🎉 Поздравляем! Администратор выдал вам **VIP-статус**. Лимит устройств увеличен до 3!")
+            else:
+                await bot.send_message(chat_id=t_id, text="ℹ️ Ваш статус был изменен администратором на **Free**.")
+        except Exception:
+            pass
 
-    asyncio.create_task(run_bot())
+    @dp.callback_query(F.data.startswith("answer_"))
+    async def process_answer_button(callback: aiogram_types.CallbackQuery):
+        if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
+            return
 
+        target_id = callback.data.split("_")[1]
+        admin_reply_targets[ADMIN_TELEGRAM_ID] = target_id
+        
+        await callback.message.answer(f"✍️ Введите ответ для пользователя (ID: <code>{target_id}</code>) в следующем сообщении:", parse_mode="HTML")
+        await callback.answer()
+
+    # Перехват текстовых сообщений администратора для ответа клиенту
+    @dp.message()
+    async def admin_text_handler(m: aiogram_types.Message):
+        t_id = str(m.from_user.id)
+        if t_id == ADMIN_TELEGRAM_ID and t_id in admin_reply_targets:
+            target_user_id = admin_reply_targets.pop(t_id)
+            try:
+                await bot.send_message(chat_id=target_user_id, text=f"💬 **Ответ от техподдержки:**\n\n{m.text}", parse_mode="Markdown")
+                await m.answer("✅ Ответ успешно отправлен пользователю!")
+            except Exception as e:
+                await m.answer(f"❌ Не удалось отправить сообщение пользователю: {e}")
+
+    print("Main bot with Admin panel & Support started...")
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    except Exception as e:
+        print(f"Bot error: {e}")
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
