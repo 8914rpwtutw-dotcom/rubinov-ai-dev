@@ -1,18 +1,12 @@
 import os
 import time
 import random
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 try:
     from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Depends
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse
-    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-    import jwt
-    import sqlite3
     from google import genai
     from google.genai import types
     from google.genai.errors import APIError
@@ -28,105 +22,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
-
-# --- НАСТРОЙКИ ПОЧТЫ И БЕЗОПАСНОСТИ ---
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 465
-SMTP_EMAIL = os.getenv("SMTP_EMAIL", "8914rpwtutw@gmail.com")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "wavlkpsqxuoozyh")
-JWT_SECRET = os.getenv("JWT_SECRET", "rubinov_super_secret_key_2026_secure")
-security = HTTPBearer()
-
-# --- БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ---
-DB_NAME = "rubinov_users.db"
-
-def init_db():
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE,
-                code TEXT,
-                is_vip INTEGER DEFAULT 0
-            )
-        ''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"DB Init Error: {e}")
-
-init_db()
-
-# --- ОТПРАВКА КОДА НА ПОЧТУ ---
-def send_otp_email(to_email: str, code: str):
-    msg = MIMEMultipart()
-    msg['From'] = SMTP_EMAIL
-    msg['To'] = to_email
-    msg['Subject'] = 'Код подтверждения для Rubinov AI'
-    
-    body = f"""Приветствуем в Rubinov AI!
-    
-Ваш код для входа: {code}
-
-Код действителен в течение 5 минут. Если вы не запрашивали код, просто проигнорируйте это письмо."""
-    msg.attach(MIMEText(body, 'plain'))
-    
-    try:
-        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
-        server.login(SMTP_EMAIL, SMTP_PASSWORD)
-        server.sendmail(SMTP_EMAIL, to_email, msg.as_string())
-        server.quit()
-    except Exception as e:
-        print(f"Ошибка отправки почты: {e}")
-        raise HTTPException(status_code=500, detail="Не удалось отправить письмо на указанный email.")
-
-# --- ПРОВЕРКА JWT ТОКЕНА ---
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("user_id")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Недействительный токен авторизации.")
-
-# --- API АВТОРИЗАЦИИ ---
-@app.post("/api/auth/request-code")
-def request_code(email: str = Form(...)):
-    email = email.strip().lower()
-    if not email or "@" not in email:
-        raise HTTPException(status_code=400, detail="Некорректный email.")
-    
-    code = str(random.randint(100000, 999999))
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR IGNORE INTO users (email, code) VALUES (?, ?)", (email, code))
-    cursor.execute("UPDATE users SET code = ? WHERE email = ?", (code, email))
-    conn.commit()
-    conn.close()
-    
-    send_otp_email(email, code)
-    return {"status": "success", "message": "Код отправлен на почту."}
-
-@app.post("/api/auth/verify-code")
-def verify_code(email: str = Form(...), code: str = Form(...)):
-    email = email.strip().lower()
-    code = code.strip()
-    
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE email = ? AND code = ?", (email, code))
-    user = cursor.fetchone()
-    conn.close()
-    
-    if not user:
-        raise HTTPException(status_code=400, detail="Неверный код подтверждения.")
-    
-    user_id = user[0]
-    token = jwt.encode({"user_id": user_id, "email": email}, JWT_SECRET, algorithm="HS256")
-    return {"access_token": token, "token_type": "bearer"}
 
 # --- ЛОГИКА ИИ (GEMINI) ---
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
@@ -222,8 +117,7 @@ def health_check():
 @app.post("/api/chat")
 async def chat_endpoint(
     prompt: str = Form(""),
-    file: Optional[UploadFile] = File(None),
-    user_id: int = Depends(get_current_user)
+    file: Optional[UploadFile] = File(None)
 ):
     if not prompt.strip() and not file:
         raise HTTPException(status_code=400, detail="Запрос или файл обязателен")
@@ -238,7 +132,7 @@ async def chat_endpoint(
     answer = get_gemini_response(prompt, file_bytes, mime_type)
     return {"response": answer}
 
-# --- ПОЛНЫЙ ИНТЕРФЕЙС СО ВХОДОМ ПО ПОЧТЕ ---
+# --- ПОЛНЫЙ ИНТЕРФЕЙС, АДАПТИРОВАННЫЙ ПОД TELEGRAM MINI APP ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -246,6 +140,8 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Rubinov AI</title>
+    <!-- Подключаем Telegram Web App SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -253,7 +149,7 @@ HTML_TEMPLATE = """
     <style>
         :root {
             --bg-main: #040508;
-            --bg-sidebar: rgba(10, 12, 18, 0.65);
+            --bg-sidebar: rgba(10, 12, 18, 0.85);
             --card-bg: rgba(18, 21, 31, 0.5);
             --border-color: rgba(255, 255, 255, 0.05);
             --border-hover: rgba(168, 85, 247, 0.25);
@@ -273,34 +169,6 @@ HTML_TEMPLATE = """
         html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); }
         body { display: flex; position: relative; }
 
-        /* МОДАЛЬНОЕ ОКНО АВТОРИЗАЦИИ */
-        #auth-modal {
-            position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh;
-            background: rgba(4, 5, 8, 0.92); backdrop-filter: blur(25px);
-            z-index: 1000; display: flex; align-items: center; justify-content: center;
-            opacity: 0; pointer-events: none; transition: opacity 0.3s ease;
-        }
-        #auth-modal.active { opacity: 1; pointer-events: auto; }
-        .auth-card {
-            background: rgba(18, 21, 31, 0.9); border: 1px solid rgba(168, 85, 247, 0.3);
-            border-radius: 24px; padding: 32px; width: 90%; max-width: 400px;
-            display: flex; flex-direction: column; gap: 20px; box-shadow: 0 20px 50px rgba(0,0,0,0.8);
-            text-align: center; color: #fff;
-        }
-        .auth-card h2 { font-size: 20px; font-weight: 700; }
-        .auth-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
-        .auth-input {
-            background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 14px; padding: 12px 16px; color: #fff; font-size: 14px; outline: none; width: 100%;
-        }
-        .auth-input:focus { border-color: rgba(168, 85, 247, 0.5); }
-        .auth-btn {
-            background: var(--accent-gradient); color: #fff; border: none; border-radius: 14px;
-            padding: 12px; font-size: 14px; font-weight: 600; cursor: pointer; transition: 0.2s;
-            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
-        }
-        .auth-btn:hover { transform: translateY(-1px); }
-
         body::before {
             content: ''; position: fixed; top: -15vh; left: -15vw; width: 55vw; height: 55vh;
             background: radial-gradient(circle, rgba(99, 102, 241, 0.07) 0%, rgba(168, 85, 247, 0.02) 60%, transparent 80%);
@@ -315,7 +183,6 @@ HTML_TEMPLATE = """
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 20px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(168, 85, 247, 0.3); }
 
         #sidebar-overlay {
             display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh;
@@ -462,24 +329,6 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-    <!-- Модальное окно авторизации -->
-    <div id="auth-modal">
-        <div class="auth-card">
-            <h2>Вход в Rubinov AI</h2>
-            <p id="auth-desc">Введите вашу почту, чтобы получить защищенный код подтверждения.</p>
-            
-            <div id="step-email" style="display: flex; flex-direction: column; gap: 14px;">
-                <input type="email" id="user-email" class="auth-input" placeholder="name@example.com" />
-                <button class="auth-btn" onclick="requestOtp()">Получить код</button>
-            </div>
-
-            <div id="step-code" style="display: none; flex-direction: column; gap: 14px;">
-                <input type="text" id="user-code" class="auth-input" placeholder="Введите 6-значный код" maxlength="6" />
-                <button class="auth-btn" onclick="verifyOtp()">Войти в систему</button>
-            </div>
-        </div>
-    </div>
-
     <div id="sidebar-overlay" onclick="toggleSidebar()"></div>
 
     <div id="sidebar">
@@ -498,7 +347,7 @@ HTML_TEMPLATE = """
             </svg>
             <div>
                 <h2>Rubinov AI</h2>
-                <span>Secure Edition</span>
+                <span>Telegram App</span>
             </div>
         </div>
 
@@ -515,7 +364,7 @@ HTML_TEMPLATE = """
 
         <div class="sidebar-footer">
             <span class="status-dot"></span>
-            <span>Online</span>
+            <span id="tg-username">Telegram User</span>
         </div>
     </div>
 
@@ -557,59 +406,21 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        let token = localStorage.getItem('rubinov_token');
-        let chats = JSON.parse(localStorage.getItem('rubinov_chats_main_v1') || '[]');
-        let currentChatId = localStorage.getItem('rubinov_active_chat_main_v1') || null;
+        // Инициализация Telegram WebApp
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
+
+        if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+            const user = tg.initDataUnsafe.user;
+            document.getElementById('tg-username').textContent = user.first_name || 'Telegram User';
+        }
+
+        let chats = JSON.parse(localStorage.getItem('rubinov_chats_tg_v1') || '[]');
+        let currentChatId = localStorage.getItem('rubinov_active_chat_tg_v1') || null;
         let selectedFile = null;
         let activeController = null;
         let isGenerating = false;
-
-        function checkAuth() {
-            if (!token) {
-                document.getElementById('auth-modal').classList.add('active');
-            } else {
-                document.getElementById('auth-modal').classList.remove('active');
-            }
-        }
-
-        async function requestOtp() {
-            const email = document.getElementById('user-email').value.trim();
-            if (!email) return alert('Введите email');
-            
-            const res = await fetch('/api/auth/request-code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ email })
-            });
-            
-            if (res.ok) {
-                document.getElementById('step-email').style.display = 'none';
-                document.getElementById('step-code').style.display = 'flex';
-                document.getElementById('auth-desc').textContent = 'Код отправлен на почту. Проверьте входящие (и спам).';
-            } else {
-                alert('Ошибка отправки кода');
-            }
-        }
-
-        async function verifyOtp() {
-            const email = document.getElementById('user-email').value.trim();
-            const code = document.getElementById('user-code').value.trim();
-            
-            const res = await fetch('/api/auth/verify-code', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ email, code })
-            });
-            
-            const data = await res.json();
-            if (res.ok) {
-                localStorage.setItem('rubinov_token', data.access_token);
-                token = data.access_token;
-                checkAuth();
-            } else {
-                alert(data.detail || 'Неверный код');
-            }
-        }
 
         if (chats.length === 0) {
             const initialChat = { id: Date.now().toString(), name: 'Новый чат 1', messages: [] };
@@ -621,8 +432,8 @@ HTML_TEMPLATE = """
         }
 
         function saveState() {
-            localStorage.setItem('rubinov_chats_main_v1', JSON.stringify(chats));
-            localStorage.setItem('rubinov_active_chat_main_v1', currentChatId);
+            localStorage.setItem('rubinov_chats_tg_v1', JSON.stringify(chats));
+            localStorage.setItem('rubinov_active_chat_tg_v1', currentChatId);
             renderChats();
         }
 
@@ -864,7 +675,6 @@ HTML_TEMPLATE = """
             try {
                 const res = await fetch('/api/chat', {
                     method: 'POST',
-                    headers: { 'Authorization': 'Bearer ' + token },
                     body: formData,
                     signal: activeController.signal
                 });
@@ -877,12 +687,7 @@ HTML_TEMPLATE = """
                 if (res.ok) {
                     activeChat.messages.push({ role: 'bot', text: data.response });
                 } else {
-                    if (res.status === 401) {
-                        localStorage.removeItem('rubinov_token');
-                        location.reload();
-                    } else {
-                        activeChat.messages.push({ role: 'bot', text: 'Ошибка: ' + (data.detail || 'Не удалось получить ответ.') });
-                    }
+                    activeChat.messages.push({ role: 'bot', text: 'Ошибка: ' + (data.detail || 'Не удалось получить ответ.') });
                 }
             } catch (e) {
                 if (e.name === 'AbortError') return;
@@ -899,7 +704,6 @@ HTML_TEMPLATE = """
             return (text || '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         }
 
-        checkAuth();
         renderChats();
     </script>
 </body>
