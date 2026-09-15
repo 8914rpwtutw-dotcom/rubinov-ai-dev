@@ -12,7 +12,7 @@ from google.genai.errors import APIError
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import httpx
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -28,13 +28,15 @@ def init_db():
             is_banned INTEGER DEFAULT 0,
             is_vip INTEGER DEFAULT 0,
             auth_code TEXT,
-            auth_code_expires REAL
+            auth_code_expires REAL,
+            waiting_for_ticket INTEGER DEFAULT 0
         )
     """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id TEXT,
+            username TEXT,
             message TEXT,
             created_at REAL
         )
@@ -47,19 +49,26 @@ def register_user_if_not_exists(telegram_id: str, username: str):
     cursor = conn.cursor()
     cursor.execute("SELECT telegram_id FROM users WHERE telegram_id = ?", (telegram_id,))
     if not cursor.fetchone():
-        cursor.execute("INSERT INTO users (telegram_id, username, is_banned, is_vip) VALUES (?, ?, 0, 0)", (telegram_id, username))
+        cursor.execute("INSERT INTO users (telegram_id, username, is_banned, is_vip, waiting_for_ticket) VALUES (?, ?, 0, 0, 0)", (telegram_id, username))
         conn.commit()
     conn.close()
 
 def check_user_status(telegram_id: str):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT is_banned, is_vip FROM users WHERE telegram_id = ?", (telegram_id,))
+    cursor.execute("SELECT is_banned, is_vip, waiting_for_ticket FROM users WHERE telegram_id = ?", (telegram_id,))
     row = cursor.fetchone()
     conn.close()
     if not row:
-        return {"is_banned": False, "is_vip": False}
-    return {"is_banned": bool(row[0]), "is_vip": bool(row[1])}
+        return {"is_banned": False, "is_vip": False, "waiting_for_ticket": 0}
+    return {"is_banned": bool(row[0]), "is_vip": bool(row[1]), "waiting_for_ticket": row[2]}
+
+def set_waiting_for_ticket(telegram_id: str, state: int):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET waiting_for_ticket = ? WHERE telegram_id = ?", (state, telegram_id))
+    conn.commit()
+    conn.close()
 
 def save_auth_code(telegram_id: str, code: str, expires_at: float):
     conn = sqlite3.connect(DB_FILE)
@@ -95,12 +104,20 @@ def set_user_vip(telegram_id: str, vip: int):
     conn.commit()
     conn.close()
 
-def save_ticket(telegram_id: str, message: str, created_at: float):
+def save_ticket(telegram_id: str, username: str, message: str, created_at: float):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO tickets (telegram_id, message, created_at) VALUES (?, ?, ?)", (telegram_id, message, created_at))
+    cursor.execute("INSERT INTO tickets (telegram_id, username, message, created_at) VALUES (?, ?, ?, ?)", (telegram_id, username, message, created_at))
     conn.commit()
     conn.close()
+
+def get_all_tickets():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, telegram_id, username, message, created_at FROM tickets ORDER BY id DESC LIMIT 10")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
 
 
 # ==================== TELEGRAM БОТ ====================
@@ -115,7 +132,7 @@ def get_main_keyboard(is_admin: bool = False):
         [KeyboardButton(text="🔑 Получить код"), KeyboardButton(text="🎫 Тикеты")],
     ]
     if is_admin:
-        keyboard.append([KeyboardButton(text="👑 Админ-панель")])
+        keyboard.append([KeyboardButton(text="👑 Админ-панель"), KeyboardButton(text="📋 Просмотр тикетов")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 @dp.message(Command("start"))
@@ -124,12 +141,13 @@ async def cmd_start(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
     register_user_if_not_exists(tg_id, username)
+    set_waiting_for_ticket(tg_id, 0)
     is_admin = (tg_id == str(ADMIN_ID))
     
     await message.answer(
         f"👋 Привет, <b>@{username}</b>!\n\n"
         f"🤖 Добро пожаловать в <b>Rubinov AI</b>.\n"
-        f"Нажмите кнопку <b>🔑 Получить код</b>, чтобы войти на сайт.",
+        f"Используйте кнопки ниже для управления.",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(is_admin)
     )
@@ -138,8 +156,8 @@ async def cmd_start(message: types.Message):
 async def btn_get_code(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
-    
     register_user_if_not_exists(tg_id, username)
+    set_waiting_for_ticket(tg_id, 0)
     
     status = check_user_status(tg_id)
     if status["is_banned"]:
@@ -157,9 +175,40 @@ async def btn_get_code(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text.contains("Тикеты"))
+@dp.message(F.text.contains("🎫 Тикеты"))
 async def btn_tickets(message: types.Message):
-    await message.answer("💬 Напишите ваше сообщение или вопрос прямо сюда, и поддержка ответит вам!")
+    tg_id = str(message.from_user.id)
+    username = message.from_user.username or "user"
+    register_user_if_not_exists(tg_id, username)
+    
+    # Включаем режим ожидания текста тикета
+    set_waiting_for_ticket(tg_id, 1)
+    await message.answer(
+        "💬 <b>Создание тикета в поддержку:</b>\n\n"
+        "Опишите ваш вопрос или проблему прямо следующим сообщением, и оно будет отправлено администратору.",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text.contains("📋 Просмотр тикетов"))
+async def btn_view_tickets(message: types.Message):
+    tg_id = str(message.from_user.id)
+    if tg_id != str(ADMIN_ID):
+        return
+    
+    tickets = get_all_tickets()
+    if not tickets:
+        await message.answer("📭 Активных тикетов нет.")
+        return
+    
+    text = "📋 <b>Последние тикеты:</b>\n\n"
+    for t_id, t_tg_id, t_username, t_msg, t_time in tickets:
+        time_str = time.strftime('%d.%m %H:%M', time.localtime(t_time))
+        text += f"🆔 <b>Тикет #{t_id}</b> от @{t_username} (<code>{t_tg_id}</code>) от {time_str}:\n" \
+                f"💬 {t_msg}\n" \
+                f"Ответить: <code>/reply {t_tg_id} текст</code>\n" \
+                f"-----------------------------------\n"
+    
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(F.text.contains("Админ-панель"))
 async def btn_admin_panel(message: types.Message):
@@ -218,8 +267,11 @@ async def cmd_reply(message: types.Message):
     if str(message.from_user.id) != str(ADMIN_ID): return
     parts = message.text.split(" ", 2)
     if len(parts) < 3: return
-    await bot.send_message(int(parts[1]), f"💬 <b>Ответ поддержки:</b>\n{parts[2]}", parse_mode="HTML")
-    await message.answer("✅ Отправлено.")
+    try:
+        await bot.send_message(int(parts[1]), f"💬 <b>Ответ поддержки:</b>\n{parts[2]}", parse_mode="HTML")
+        await message.answer("✅ Ответ успешно отправлен пользователю.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки: {e}")
 
 @dp.message()
 async def handle_other_messages(message: types.Message):
@@ -227,15 +279,30 @@ async def handle_other_messages(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
     status = check_user_status(tg_id)
+    
     if status["is_banned"]:
         await message.answer("⛔ Вы забанены.")
         return
-    save_ticket(tg_id, message.text, time.time())
-    if ADMIN_ID:
-        try:
-            await bot.send_message(int(ADMIN_ID), f"📩 <b>Тикет от @{username} ({tg_id}):</b>\n{message.text}\nОтветить: /reply {tg_id} текст", parse_mode="HTML")
-        except: pass
-    await message.answer("✅ Сообщение передано в поддержку.")
+    
+    # Проверяем, ждем ли мы от пользователя текст тикета
+    if status["waiting_for_ticket"] == 1:
+        save_ticket(tg_id, username, message.text, time.time())
+        set_waiting_for_ticket(tg_id, 0) # Сбрасываем режим
+        
+        await message.answer("✅ Ваш тикет успешно отправлен в поддержку! Ожидайте ответа.")
+        
+        if ADMIN_ID:
+            try:
+                await bot.send_message(
+                    int(ADMIN_ID), 
+                    f"📩 <b>Новый тикет от @{username} ({tg_id}):</b>\n{message.text}\n\nОтветить: <code>/reply {tg_id} текст</code>", 
+                    parse_mode="HTML"
+                )
+            except: pass
+        return
+
+    # Обычные сообщения (если не нажата кнопка тикета) просто игнорируются или выводят подсказку
+    await message.answer("ℹ️ Используйте кнопки меню. Чтобы обратиться в поддержку, нажмите кнопку <b>🎫 Тикеты</b>.", parse_mode="HTML")
 
 
 # ==================== FASTAPI СЕРВЕР ====================
