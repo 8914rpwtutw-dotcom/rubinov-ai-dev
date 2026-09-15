@@ -137,7 +137,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 
     raise HTTPException(status_code=500, detail="Сервис ИИ перегружен. Повторите попытку.")
 
-# --- TELEGRAM БОТ ---
+# --- TELEGRAM БОТ (ЛОГИКА И КНОПКИ) ---
 @dp.message(Command("start"))
 async def cmd_start(message: aiogram_types.Message):
     user_id = message.from_user.id
@@ -159,6 +159,24 @@ async def cmd_start(message: aiogram_types.Message):
     is_vip = user_data[0] if user_data else 0
     vip_status = "👑 VIP Активен" if is_vip else "👤 Стандарт"
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 Получить код для входа", callback_data="generate_code")],
+        [InlineKeyboardButton(text="💬 Тикеты (Поддержка)", callback_data="create_ticket")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users"), InlineKeyboardButton(text="🔍 Найти по ID", callback_data="admin_search_prompt")]
+    ])
+
+    if user_id == ADMIN_TELEGRAM_ID:
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
+
+    await message.answer(
+        f"👋 Добро пожаловать в **Rubinov AI**!\nСтатус: {vip_status}\n\nВыберите действие в меню ниже:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data == "generate_code")
+async def process_generate_code(callback: aiogram_types.CallbackQuery):
+    user_id = callback.from_user.id
     import random
     code = "".join(random.choices("0123456789", k=6))
     
@@ -169,30 +187,156 @@ async def cmd_start(message: aiogram_types.Message):
     conn.commit()
     conn.close()
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Получить код для входа на сайт", callback_data=f"get_code_{code}")],
-        [InlineKeyboardButton(text="💬 Написать в поддержку", callback_data="create_ticket")]
-    ])
-
-    if user_id == ADMIN_TELEGRAM_ID:
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
-
-    await message.answer(
-        f"👋 Добро пожаловать в **Rubinov AI**!\nСтатус: {vip_status}\n\nНажмите кнопку ниже для получения кода авторизации в веб-интерфейсе:",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-
-@dp.callback_query(F.data.startswith("get_code_"))
-async def process_get_code(callback: aiogram_types.CallbackQuery):
-    code = callback.data.split("_")[2]
-    await callback.message.answer(f"🔐 Ваш код авторизации на сайте: `{code}`\nДействителен 5 минут.", parse_mode="Markdown")
-    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            f"🔐 Ваш код авторизации на сайте: `{code}`\n\n⏱ Действителен 5 минут.",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        await callback.message.answer(f"🔐 Ваш код авторизации на сайте: `{code}`", parse_mode="Markdown")
+        
+    await callback.answer("Код сгенерирован!")
 
 @dp.callback_query(F.data == "create_ticket")
 async def process_ticket_start(callback: aiogram_types.CallbackQuery):
     await callback.message.answer("✍️ Отправьте ваше сообщение в поддержку одним сообщением:", parse_mode="Markdown")
     await callback.answer()
+
+@dp.callback_query(F.data == "admin_panel")
+async def process_admin_panel(callback: aiogram_types.CallbackQuery):
+    if callback.from_user.id != ADMIN_TELEGRAM_ID:
+        await callback.answer("⛔ У вас нет доступа!", show_alert=True)
+        return
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
+        [InlineKeyboardButton(text="🔍 Найти по ID", callback_data="admin_search_prompt")]
+    ])
+    await callback.message.answer("🛠 **Панель администратора:**", reply_markup=keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_users")
+async def process_admin_users(callback: aiogram_types.CallbackQuery):
+    if callback.from_user.id != ADMIN_TELEGRAM_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT telegram_id, username, is_vip, is_banned FROM users LIMIT 10")
+    rows = cursor.fetchall()
+    conn.close()
+
+    text = "👥 **Последние пользователи:**\n\n"
+    for r in rows:
+        vip_icon = "👑" if r[2] else "👤"
+        ban_icon = "🔴" if r[3] else "🟢"
+        text += f"{vip_icon} {ban_icon} ID: `{r[0]}` | @{r[1] or 'no_username'}\n"
+
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_search_prompt")
+async def process_search_prompt(callback: aiogram_types.CallbackQuery):
+    if callback.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    await callback.message.answer("🔍 Отправьте команду в формате:\n`/user [TELEGRAM_ID]` для управления пользователем.", parse_mode="Markdown")
+    await callback.answer()
+
+@dp.message(Command("user"))
+async def cmd_manage_user(message: aiogram_types.Message):
+    if message.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("⚠️ Использование: `/user [TELEGRAM_ID]`", parse_mode="Markdown")
+        return
+    
+    try:
+        target_id = int(parts[1])
+    except ValueError:
+        await message.answer("⚠️ Неверный Telegram ID.")
+        return
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT username, is_vip, is_banned FROM users WHERE telegram_id = ?", (target_id,))
+    user = cursor.fetchone()
+    conn.close()
+
+    if not user:
+        await message.answer("❌ Пользователь не найден.")
+        return
+
+    vip_status = "Активен" if user[1] else "Нет"
+    ban_status = "Забанен" if user[2] else "Нет"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⭐ Сменить VIP", callback_data=f"adm_vip_{target_id}"),
+            InlineKeyboardButton(text="⛔ Сменить Бан", callback_data=f"adm_ban_{target_id}")
+        ]
+    ])
+
+    await message.answer(
+        f"👤 **Информация о пользователе `{target_id}`**:\n"
+        f"• Username: @{user[0] or 'нет'}\n"
+        f"• Забанен: {ban_status}\n"
+        f"• VIP статус: {vip_status}",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("adm_"))
+async def process_adm_action(callback: aiogram_types.CallbackQuery):
+    if callback.from_user.id != ADMIN_TELEGRAM_ID:
+        return
+    
+    parts = callback.data.split("_")
+    action_type = parts[1]
+    target_id = int(parts[2])
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_vip, is_banned FROM users WHERE telegram_id = ?", (target_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        await callback.answer("Пользователь не найден!", show_alert=True)
+        return
+
+    is_vip, is_banned = row
+    if action_type == "vip":
+        is_vip = 1 - is_vip
+        cursor.execute("UPDATE users SET is_vip = ? WHERE telegram_id = ?", (is_vip, target_id))
+    elif action_type == "ban":
+        is_banned = 1 - is_banned
+        cursor.execute("UPDATE users SET is_banned = ? WHERE telegram_id = ?", (is_banned, target_id))
+
+    conn.commit()
+    conn.close()
+
+    await callback.answer("Успешно изменено!")
+    try:
+        if action_type == "ban":
+            if is_banned == 1:
+                await bot.send_message(target_id, "❌ Вы забанены! Напишите в поддержку.")
+            else:
+                await bot.send_message(target_id, "✅ Вы разбанены!")
+        elif action_type == "vip":
+            if is_vip == 1:
+                await bot.send_message(target_id, "👑 Поздравляем! Вам выдан VIP статус.")
+            else:
+                await bot.send_message(target_id, "ℹ️ Ваш VIP статус был снят.")
+    except Exception:
+        pass
+
+    await callback.message.edit_text(
+        f"✅ Статус пользователя `{target_id}` обновлен!\n• VIP: {'Да' if is_vip else 'Нет'}\n• Бан: {'Да' if is_banned else 'Нет'}",
+        parse_mode="Markdown"
+    )
 
 # --- API МАРШРУТЫ ---
 @app.post("/api/auth/verify")
@@ -248,7 +392,7 @@ async def chat_endpoint(
     rubinov_tg_id: Optional[str] = Cookie(None)
 ):
     if not rubinov_tg_id:
-        raise HTTPException(status_code=401, detail="Требуется авторизация через бота.")
+        raise HTTPException(status_code=401, detail="Требуется авторизация.")
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -288,7 +432,6 @@ async def admin_action(telegram_id: int = Form(...), action: str = Form(...), ru
     
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
     cursor.execute("SELECT is_vip, is_banned FROM users WHERE telegram_id = ?", (telegram_id,))
     row = cursor.fetchone()
     if not row:
@@ -308,7 +451,6 @@ async def admin_action(telegram_id: int = Form(...), action: str = Form(...), ru
     conn.commit()
     conn.close()
 
-    # Отправка уведомлений в Telegram
     try:
         if action == "toggle_ban":
             if new_ban == 1:
@@ -326,13 +468,13 @@ async def admin_action(telegram_id: int = Form(...), action: str = Form(...), ru
     return {"status": "ok"}
 
 
-# --- HTML ИНТЕРФЕЙС С УЧЕТОМ ВСЕХ ТРЕБОВАНИЙ ---
+# --- HTML ИНТЕРФЕЙС ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Rubinov AI</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -342,7 +484,6 @@ HTML_TEMPLATE = """
         :root {
             --bg-main: #040508;
             --bg-sidebar: rgba(10, 12, 18, 0.65);
-            --card-bg: rgba(18, 21, 31, 0.5);
             --border-color: rgba(255, 255, 255, 0.05);
             --accent-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
             --text-main: #f1f5f9;
@@ -350,114 +491,58 @@ HTML_TEMPLATE = """
             --user-msg-bg: linear-gradient(135deg, rgba(99, 102, 241, 0.16) 0%, rgba(168, 85, 247, 0.14) 100%);
             --bot-msg-bg: rgba(15, 18, 26, 0.65);
         }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; -webkit-tap-highlight-color: transparent; }
-        html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); }
-        body { display: flex; position: relative; }
-
-        #auth-screen {
-            position: fixed; inset: 0; background: var(--bg-main); z-index: 1000;
-            display: flex; justify-content: center; align-items: center;
-        }
-        .auth-card {
-            background: rgba(18, 21, 31, 0.85); border: 1px solid rgba(168, 85, 247, 0.2);
-            backdrop-filter: blur(24px); padding: 35px; border-radius: 24px; width: 90%; max-width: 400px;
-            text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.7);
-        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+        html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); display: flex; }
+        #auth-screen { position: fixed; inset: 0; background: var(--bg-main); z-index: 1000; display: flex; justify-content: center; align-items: center; }
+        .auth-card { background: rgba(18, 21, 31, 0.85); border: 1px solid rgba(168, 85, 247, 0.2); backdrop-filter: blur(24px); padding: 35px; border-radius: 24px; width: 90%; max-width: 400px; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.7); }
         .auth-card h2 { font-size: 22px; font-weight: 700; color: #fff; margin-bottom: 10px; }
         .auth-card p { font-size: 13px; color: var(--text-muted); line-height: 1.5; margin-bottom: 20px; }
-        .auth-input {
-            width: 100%; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color);
-            border-radius: 12px; color: #fff; font-size: 20px; text-align: center; letter-spacing: 6px; margin-bottom: 15px; outline: none;
-        }
+        .auth-input { width: 100%; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 12px; color: #fff; font-size: 20px; text-align: center; letter-spacing: 6px; margin-bottom: 15px; outline: none; }
         .auth-btn { background: var(--accent-gradient); color: #fff; border: none; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer; width: 100%; font-size: 14px; }
-
-        /* БАН ПЛАШКА */
-        #ban-screen {
-            position: fixed; inset: 0; background: rgba(4, 5, 8, 0.95); backdrop-filter: blur(15px); z-index: 2000;
-            display: flex; justify-content: center; align-items: center; flex-direction: column; text-align: center; padding: 20px;
-        }
+        #ban-screen { position: fixed; inset: 0; background: rgba(4, 5, 8, 0.95); backdrop-filter: blur(15px); z-index: 2000; display: flex; justify-content: center; align-items: center; flex-direction: column; text-align: center; padding: 20px; }
         #ban-screen h1 { color: #f87171; font-size: 28px; margin-bottom: 10px; }
         #ban-screen p { color: var(--text-muted); font-size: 15px; }
-
         .hidden { display: none !important; }
-
-        #sidebar { 
-            width: 280px; min-width: 280px; background: var(--bg-sidebar); backdrop-filter: blur(24px);
-            border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 20px 14px; 
-            z-index: 50; height: 100dvh; transition: all 0.3s ease;
-        }
+        #sidebar { width: 280px; min-width: 280px; background: var(--bg-sidebar); backdrop-filter: blur(24px); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 20px 14px; z-index: 50; height: 100dvh; transition: all 0.3s ease; }
         body.sidebar-collapsed #sidebar { margin-left: -280px; }
-
         .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; padding: 0 4px; }
         .brand-logo-svg { width: 32px; height: 32px; filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.5)); flex-shrink: 0; }
         .brand h2 { font-size: 15px; font-weight: 700; color: #ffffff; }
         .brand span { font-size: 10px; color: var(--text-muted); display: block; }
-
-        .btn-new-chat { 
-            background: var(--accent-gradient); color: #ffffff; border: none; padding: 11px 16px; 
-            border-radius: 14px; font-size: 12px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 9px; 
-            margin-bottom: 18px; box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
-        }
+        .btn-new-chat { background: var(--accent-gradient); color: #ffffff; border: none; padding: 11px 16px; border-radius: 14px; font-size: 12px; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 9px; margin-bottom: 18px; box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3); }
         .chats-header { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); font-weight: 700; margin-bottom: 8px; padding: 0 4px; text-transform: uppercase; }
-        
         #chats-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 2px; }
-        .chat-item { 
-            background: rgba(255, 255, 255, 0.015); border: 1px solid var(--border-color); border-radius: 12px; padding: 10px 12px; 
-            font-size: 12px; color: #cbd5e1; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: all 0.2s ease;
-        }
+        .chat-item { background: rgba(255, 255, 255, 0.015); border: 1px solid var(--border-color); border-radius: 12px; padding: 10px 12px; font-size: 12px; color: #cbd5e1; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
         .chat-item.active { background: rgba(168, 85, 247, 0.1); border-color: rgba(168, 85, 247, 0.35); color: #ffffff; }
         .chat-item.locked { opacity: 0.6; border-color: rgba(248, 113, 113, 0.3); }
-
         .sidebar-footer { font-size: 11px; color: var(--text-muted); display: flex; flex-direction: column; gap: 8px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--border-color); }
         .status-row { display: flex; align-items: center; gap: 8px; }
         .status-dot { width: 7px; height: 7px; background: #a855f7; border-radius: 50%; box-shadow: 0 0 10px rgba(168, 85, 247, 0.8); }
-
         #main { flex: 1; display: flex; flex-direction: column; background: var(--bg-main); position: relative; height: 100dvh; overflow: hidden; }
-        
-        #chat-header { 
-            height: 60px; min-height: 60px; border-bottom: 1px solid var(--border-color); 
-            display: flex; align-items: center; justify-content: space-between; padding: 0 24px; background: rgba(4, 5, 8, 0.5); backdrop-filter: blur(16px);
-        }
+        #chat-header { height: 60px; min-height: 60px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; background: rgba(4, 5, 8, 0.5); backdrop-filter: blur(16px); }
         .header-left { display: flex; align-items: center; gap: 14px; }
         .menu-toggle { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); color: #ffffff; border-radius: 12px; padding: 8px; cursor: pointer; }
         #chat-header h3 { font-size: 14px; font-weight: 600; color: #ffffff; }
-
         #chat-container { flex: 1; overflow-y: auto; padding: 24px 24px 140px 24px; display: flex; flex-direction: column; gap: 22px; max-width: 900px; width: 100%; margin: 0 auto; position: relative; }
-
-        .welcome-screen {
-            position: absolute; top: 45%; left: 50%; transform: translate(-50%, -50%); text-align: center; width: 90%; max-width: 480px; display: flex; flex-direction: column; align-items: center; gap: 16px;
-        }
+        .welcome-screen { position: absolute; top: 45%; left: 50%; transform: translate(-50%, -50%); text-align: center; width: 90%; max-width: 480px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
         .welcome-avatar-glow { padding: 20px; border-radius: 28px; background: rgba(168, 85, 247, 0.04); border: 1px solid rgba(168, 85, 247, 0.15); }
         .welcome-avatar-svg { width: 60px; height: 60px; }
-        
         .msg-row { display: flex; flex-direction: column; width: 100%; }
         .msg-row.user-row { align-items: flex-end; }
         .msg-row.bot-row { align-items: flex-start; }
-
-        .msg-user { 
-            background: var(--user-msg-bg); color: #ffffff; border: 1px solid rgba(168, 85, 247, 0.22); border-radius: 18px 18px 4px 18px; 
-            padding: 13px 18px; font-size: 13.5px; line-height: 1.55; max-width: 85%; word-break: break-word;
-        }
-        .msg-bot { 
-            background: var(--bot-msg-bg); border: 1px solid var(--border-color); color: #e2e8f0; border-radius: 18px 18px 18px 4px; 
-            padding: 18px 22px; font-size: 13.5px; line-height: 1.65; max-width: 90%; word-break: break-word;
-        }
-
+        .msg-user { background: var(--user-msg-bg); color: #ffffff; border: 1px solid rgba(168, 85, 247, 0.22); border-radius: 18px 18px 4px 18px; padding: 13px 18px; font-size: 13.5px; max-width: 85%; word-break: break-word; }
+        .msg-bot { background: var(--bot-msg-bg); border: 1px solid var(--border-color); color: #e2e8f0; border-radius: 18px 18px 18px 4px; padding: 18px 22px; font-size: 13.5px; max-width: 90%; word-break: break-word; }
         .loader-box { display: flex; align-items: center; gap: 12px; background: var(--bot-msg-bg); border: 1px solid var(--border-color); border-radius: 18px; padding: 14px 20px; font-size: 13.5px; color: var(--text-muted); }
         .spinner { width: 16px; height: 16px; border: 2px solid rgba(168,85,247,0.2); border-top-color: #a855f7; border-radius: 50%; animation: spin 0.8s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
-
         #input-wrapper { position: absolute; bottom: 0; left: 0; right: 0; padding: 16px 24px; background: linear-gradient(180deg, rgba(4,5,8,0) 0%, var(--bg-main) 40%); }
         #input-container { max-width: 900px; margin: 0 auto; background: rgba(13, 16, 24, 0.8); backdrop-filter: blur(24px); border: 1px solid rgba(168, 85, 247, 0.18); border-radius: 20px; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
-        
         #file-info-bar { display: none; align-items: center; justify-content: space-between; background: rgba(168, 85, 247, 0.12); padding: 6px 12px; border-radius: 10px; font-size: 11.5px; color: #d8b4fe; }
         .input-row { display: flex; gap: 8px; align-items: center; width: 100%; }
         .mini-btn { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border-color); color: var(--text-muted); padding: 10px; border-radius: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
         .mini-btn.disabled { opacity: 0.3; cursor: not-allowed; }
         #prompt-input { flex: 1; background: transparent; border: none; color: #ffffff; font-size: 14px; outline: none; padding: 6px 4px; }
         .btn-action { background: var(--accent-gradient); color: #ffffff; border: none; border-radius: 12px; padding: 11px 20px; font-size: 12.5px; font-weight: 600; cursor: pointer; }
-
         .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(5px); display: flex; justify-content: center; align-items: center; z-index: 200; }
         .modal-content { background: #0c1017; border: 1px solid var(--border-color); border-radius: 20px; padding: 30px; width: 100%; max-width: 600px; max-height: 80vh; overflow-y: auto; }
         table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
@@ -470,13 +555,12 @@ HTML_TEMPLATE = """
     <div id="auth-screen">
         <div class="auth-card">
             <h2>Rubinov AI</h2>
-            <p>Запустите Telegram-бота, нажмите кнопку <b>«Получить код для входа на сайт»</b> и введите 6-значный код ниже.</p>
+            <p>Запустите Telegram-бота, получите код авторизации и введите его ниже.</p>
             <input type="text" id="code-input" class="auth-input" placeholder="••••••" maxlength="6">
             <button class="auth-btn" onclick="verifyCode()">Войти в систему</button>
         </div>
     </div>
 
-    <!-- ПЛАШКА БАНА -->
     <div id="ban-screen" class="hidden">
         <h1>Вы забанены!</h1>
         <p>Ваш аккаунт заблокирован. Пожалуйста, напишите в поддержку через Telegram-бота.</p>
@@ -511,7 +595,7 @@ HTML_TEMPLATE = """
                 <span class="status-dot"></span>
                 <span id="user-status-text">Загрузка...</span>
             </div>
-            <button onclick="logout()" style="background:none; border:none; color:#f87171; cursor:pointer; text-align:left; font-size:11px; padding:0;">Выйти из аккаунта</button>
+            <button onclick="logout()" style="background:none; border:none; color:#f87171; cursor:pointer; text-align:left; font-size:11px; padding:0;">Выйти</button>
         </div>
     </div>
 
@@ -561,7 +645,6 @@ HTML_TEMPLATE = """
         let selectedFile = null;
         let isVip = false;
 
-        // ПЕРИОДИЧЕСКАЯ ПРОВЕРКА БАНА И VIP (каждые 5 секунд)
         async function backgroundStatusCheck() {
             let res = await fetch('/api/auth/check');
             let data = await res.json();
@@ -574,14 +657,12 @@ HTML_TEMPLATE = """
                     document.getElementById('admin-btn').classList.remove('hidden');
                 }
 
-                // Проверка бана
                 if (data.is_banned) {
                     document.getElementById('ban-screen').classList.remove('hidden');
                 } else {
                     document.getElementById('ban-screen').classList.add('hidden');
                 }
 
-                // Управление доступностью файлов для не-VIP
                 let fileBtn = document.getElementById('file-btn');
                 if (!isVip) {
                     fileBtn.classList.add('disabled');
@@ -618,7 +699,6 @@ HTML_TEMPLATE = """
         }
         initChatApp();
 
-        // Проверка времени жизни чатов (4 часа для не-VIP)
         function cleanExpiredChats() {
             const now = Date.now();
             const FOUR_HOURS = 4 * 60 * 60 * 1000;
@@ -659,7 +739,7 @@ HTML_TEMPLATE = """
                     <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:150px;">
                         ${chat.locked ? '🔒 ' : ''}${escapeHtml(chat.name)}
                     </span>
-                    <span class="close-btn" onclick="event.stopPropagation(); deleteChat('${chat.id}')">×</span>
+                    <span onclick="event.stopPropagation(); deleteChat('${chat.id}')">×</span>
                 `;
                 list.appendChild(item);
             });
@@ -673,7 +753,7 @@ HTML_TEMPLATE = """
 
         function createNewChat() {
             if (!isVip && chats.length >= 5) {
-                alert('Лимит: максимум 5 чатов для обычных пользователей. Удалите старый чат или купите VIP!');
+                alert('Лимит: максимум 5 чатов для обычных пользователей. Удалите старый или купите VIP!');
                 return;
             }
             const newChat = { 
@@ -813,7 +893,7 @@ HTML_TEMPLATE = """
                 }
             } catch (err) {
                 document.getElementById('loader-row')?.remove();
-                activeChat.messages.push({ role: 'bot', text: 'Ошибка соединения с сервером.' });
+                activeChat.messages.push({ role: 'bot', text: 'Ошибка соединения.' });
             }
             saveState();
             renderChats();
@@ -832,8 +912,8 @@ HTML_TEMPLATE = """
                         <td>${u.is_vip ? '👑 Да' : 'Нет'}</td>
                         <td>${u.is_banned ? '🔴 Да' : 'Нет'}</td>
                         <td>
-                            <button onclick="adminAction(${u.telegram_id}, 'toggle_vip')" style="padding:4px 8px; font-size:11px; width:auto; background:#6366f1; color:#fff; border:none; border-radius:4px; cursor:pointer;">VIP</button>
-                            <button onclick="adminAction(${u.telegram_id}, 'toggle_ban')" style="padding:4px 8px; font-size:11px; width:auto; background:#ef4444; color:#fff; border:none; border-radius:4px; cursor:pointer;">Бан</button>
+                            <button onclick="adminAction(${u.telegram_id}, 'toggle_vip')" style="padding:4px 8px; font-size:11px; background:#6366f1; color:#fff; border:none; border-radius:4px; cursor:pointer;">VIP</button>
+                            <button onclick="adminAction(${u.telegram_id}, 'toggle_ban')" style="padding:4px 8px; font-size:11px; background:#ef4444; color:#fff; border:none; border-radius:4px; cursor:pointer;">Бан</button>
                         </td>
                     </tr>`;
                 });
