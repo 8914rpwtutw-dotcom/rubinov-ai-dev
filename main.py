@@ -39,11 +39,12 @@ DB_NAME = "rubinov_secure.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Таблица пользователей
+    # Таблица пользователей с поддержкой статуса (tier: free / vip)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id TEXT PRIMARY KEY,
-            username TEXT
+            username TEXT,
+            tier TEXT DEFAULT 'free'
         )
     ''')
     # Таблица временных одноразовых кодов для входа
@@ -52,6 +53,13 @@ def init_db():
             code TEXT PRIMARY KEY,
             telegram_id TEXT,
             expires_at REAL
+        )
+    ''')
+    # Таблица активных сессий (для контроля лимита устройств)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            telegram_id TEXT,
+            session_id TEXT PRIMARY KEY
         )
     ''')
     conn.commit()
@@ -67,7 +75,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен авторизации.")
 
-# --- ЭНДПОИНТ ПРОВЕРКИ КОДА ВХОДА ---
+# --- ЭНДПОИНТ ПРОВЕРКИ КОДА ВХОДА И ЛИМИТОВ УСТРОЙСТВ ---
 @app.post("/api/auth/verify-code")
 def verify_login_code(code: str = Form(...)):
     code = code.strip()
@@ -89,14 +97,62 @@ def verify_login_code(code: str = Form(...)):
         conn.close()
         raise HTTPException(status_code=400, detail="Срок действия кода истек. Запросите новый в боте.")
     
+    # Проверяем статус пользователя (free или vip)
+    cursor.execute("SELECT tier FROM users WHERE telegram_id = ?", (telegram_id,))
+    user_row = cursor.fetchone()
+    tier = user_row[0] if user_row else 'free'
+    
+    # Проверяем сколько у пользователя уже активных сессий
+    cursor.execute("SELECT COUNT(*) FROM user_sessions WHERE telegram_id = ?", (telegram_id,))
+    active_sessions_count = cursor.fetchone()[0]
+    
+    # Устанавливаем лимиты: free — 1 устройство, vip — до 3 устройств
+    max_devices = 3 if tier == 'vip' else 1
+    
+    if active_sessions_count >= max_devices:
+        conn.close()
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Превышен лимит устройств ({max_devices} для вашего тарифа). Выйдите с других устройств или купите VIP."
+        )
+    
     # Удаляем использованный код
     cursor.execute("DELETE FROM login_codes WHERE code = ?", (code,))
+    
+    # Создаем новую сессию
+    session_id = str(random.randint(10000000, 99999999))
+    cursor.execute("INSERT INTO user_sessions (telegram_id, session_id) VALUES (?, ?)", (telegram_id, session_id))
+    
     conn.commit()
     conn.close()
     
     # Выдаем JWT токен сессии
-    token = jwt.encode({"telegram_id": telegram_id}, JWT_SECRET, algorithm="HS256")
+    token = jwt.encode({"telegram_id": telegram_id, "session_id": session_id}, JWT_SECRET, algorithm="HS256")
     return {"access_token": token, "token_type": "bearer"}
+
+# --- АДМИН-ПАНЕЛЬ: ПРОСМОТР ПОЛЬЗОВАТЕЛЕЙ ---
+@app.get("/api/admin/users")
+def get_all_users():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT telegram_id, username, tier FROM users")
+    rows = cursor.fetchall()
+    
+    users_list = []
+    for r in rows:
+        t_id = r[0]
+        cursor.execute("SELECT COUNT(*) FROM user_sessions WHERE telegram_id = ?", (t_id,))
+        sessions_count = cursor.fetchone()[0]
+        users_list.append({
+            "telegram_id": t_id,
+            "username": r[1],
+            "tier": r[2],
+            "active_devices": sessions_count
+        })
+        
+    conn.close()
+    return {"total_users": len(users_list), "users": users_list}
+
 
 # --- ЛОГИКА ИИ (GEMINI) ---
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
@@ -437,7 +493,7 @@ async def get_root():
     return HTML_TEMPLATE
 
 
-# --- АСИНХРОННЫЙ ЗАПУСК TELEGRAM-БОТА ЧЕРЕЗ ASYNCIO ---
+# --- АСИНХРОННЫЙ ЗАПУСК TELEGRAM-БОТА С КОМАНДАМИ /login И /buy ---
 @app.on_event("startup")
 async def on_startup():
     async def run_bot():
@@ -452,7 +508,9 @@ async def on_startup():
         async def cmd_start(message: aiogram_types.Message):
             await message.answer(
                 "👋 Привет! Я бот-помощник **Rubinov AI**.\n\n"
-                "Чтобы войти в свой веб-кабинет, отправьте мне команду:\n👉 /login"
+                "📌 **Доступные команды:**\n"
+                "👉 /login — получить код для входа на сайт (Лимит: 1 активное устройство для Free)\n"
+                "⭐ /buy — купить VIP статус (До 3 устройств и расширенные лимиты)"
             )
 
         @dp.message(Command("login"))
@@ -460,12 +518,17 @@ async def on_startup():
             telegram_id = str(message.from_user.id)
             username = message.from_user.username or message.from_user.first_name
             
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (telegram_id, username))
+            conn.commit()
+            conn.close()
+            
             code = str(random.randint(100000, 999999))
             expires_at = time.time() + 60  # 1 минута
             
             conn = sqlite3.connect(DB_NAME)
             cursor = conn.cursor()
-            cursor.execute("INSERT OR REPLACE INTO users (telegram_id, username) VALUES (?, ?)", (telegram_id, username))
             cursor.execute("INSERT OR REPLACE INTO login_codes (code, telegram_id, expires_at) VALUES (?, ?, ?)", (code, telegram_id, expires_at))
             conn.commit()
             conn.close()
@@ -474,6 +537,22 @@ async def on_startup():
                 f"🔐 Ваш одноразовый код для входа на сайт:\n\n`{code}`\n\n"
                 "⚠️ *Код действителен в течение 1 минуты.* Введите его на сайте для авторизации.",
                 parse_mode="Markdown"
+            )
+
+        @dp.message(Command("buy"))
+        async def cmd_buy(message: aiogram_types.Message):
+            telegram_id = str(message.from_user.id)
+            
+            # Временная симуляция успешной покупки VIP (позже заменим на платежный шлюз)
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET tier = 'vip' WHERE telegram_id = ?", (telegram_id,))
+            conn.commit()
+            conn.close()
+            
+            await message.answer(
+                "⭐ **Поздравляем! Вам успешно подключен VIP-статус.**\n\n"
+                "Теперь вы можете авторизоваться на **до 3 устройствах** одновременно! Используйте /login для получения кода."
             )
 
         print("Telegram bot polling started...")
