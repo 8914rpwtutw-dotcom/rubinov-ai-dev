@@ -559,6 +559,8 @@ HTML_TEMPLATE = """
         function checkAuth() {
             if (!token) {
                 document.getElementById('auth-modal').classList.add('active');
+            } else {
+                document.getElementById('auth-modal').classList.remove('active');
             }
         }
 
@@ -595,7 +597,7 @@ HTML_TEMPLATE = """
             if (res.ok) {
                 localStorage.setItem('rubinov_token', data.access_token);
                 token = data.access_token;
-                document.getElementById('auth-modal').classList.remove('active');
+                checkAuth();
             } else {
                 alert(data.detail || 'Неверный код');
             }
