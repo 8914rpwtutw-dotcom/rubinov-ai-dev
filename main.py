@@ -45,7 +45,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
     if "нарисуй" in lowered or "draw" in lowered or "сгенерируй" in lowered:
         clean_prompt = prompt.replace("Нарисуй:", "").replace("нарисуй", "").replace("сгенерируй", "").strip()
         if not clean_prompt:
-            clean_prompt = "beautiful sunset landscape"
+            clean_prompt = "beautiful futuristic neon cyberpunk landscape"
         
         import urllib.parse
         encoded_prompt = urllib.parse.quote(clean_prompt)
@@ -53,9 +53,9 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
         
         return f"""Вот ваше сгенерированное изображение по запросу: *"{clean_prompt}"*
 
-<div style="margin-top:10px;">
-    <img src="{img_url}" alt="{clean_prompt}" style="max-width:100%; border-radius:12px; display:block; margin-bottom:8px;" />
-    <a href="{img_url}" target="_blank" download="rubinov_ai.jpg" style="display:inline-block; background:#6366f1; color:#fff; padding:6px 12px; border-radius:8px; font-size:12px; text-decoration:none; font-weight:600;">📥 Скачать картинку в полном размере</a>
+<div style="margin-top:12px;">
+    <img src="{img_url}" alt="{clean_prompt}" style="max-width:100%; border-radius:14px; display:block; margin-bottom:10px; box-shadow: 0 8px 30px rgba(99, 102, 241, 0.25); border: 1px solid rgba(255,255,255,0.1);" />
+    <a href="{img_url}" target="_blank" download="rubinov_ai.jpg" style="display:inline-block; background:linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:8px 16px; border-radius:10px; font-size:12px; text-decoration:none; font-weight:600; box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4); transition: transform 0.2s;">📥 Скачать в полном размере</a>
 </div>"""
 
     api_keys = get_api_keys()
@@ -143,26 +143,49 @@ HTML_TEMPLATE = """
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         :root {
-            --bg-main: #090a0f;
-            --bg-sidebar: #0f1117;
-            --card-bg: #161822;
-            --border-color: rgba(255, 255, 255, 0.08);
-            --border-hover: rgba(255, 255, 255, 0.18);
+            --bg-main: #06070b;
+            --bg-sidebar: rgba(12, 14, 20, 0.75);
+            --card-bg: rgba(20, 23, 33, 0.6);
+            --border-color: rgba(255, 255, 255, 0.06);
+            --border-hover: rgba(168, 85, 247, 0.3);
             --accent: #6366f1;
+            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
             --accent-hover: #4f46e5;
-            --cancel-bg: rgba(248, 113, 113, 0.15);
-            --cancel-border: rgba(248, 113, 113, 0.4);
+            --cancel-bg: rgba(248, 113, 113, 0.12);
+            --cancel-border: rgba(248, 113, 113, 0.35);
             --cancel-color: #f87171;
             --text-main: #f8fafc;
             --text-muted: #94a3b8;
-            --user-msg-bg: #1e2235;
-            --bot-msg-bg: #11131c;
-            --scrollbar-thumb: #1e2235;
+            --user-msg-bg: linear-gradient(135deg, rgba(99, 102, 241, 0.18) 0%, rgba(168, 85, 247, 0.15) 100%);
+            --bot-msg-bg: rgba(17, 20, 29, 0.7);
+            --scrollbar-thumb: rgba(255, 255, 255, 0.1);
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', -apple-system, sans-serif; -webkit-tap-highlight-color: transparent; }
         html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); }
         body { display: flex; position: relative; }
+
+        /* Фоновый премиальный градиент */
+        body::before {
+            content: '';
+            position: fixed;
+            top: -20vh; left: -20vw;
+            width: 60vw; height: 60vh;
+            background: radial-gradient(circle, rgba(99, 102, 241, 0.08) 0%, rgba(168, 85, 247, 0.03) 50%, transparent 70%);
+            z-index: 0;
+            pointer-events: none;
+            filter: blur(60px);
+        }
+        body::after {
+            content: '';
+            position: fixed;
+            bottom: -20vh; right: -20vw;
+            width: 60vw; height: 60vh;
+            background: radial-gradient(circle, rgba(168, 85, 247, 0.06) 0%, rgba(236, 72, 153, 0.02) 50%, transparent 70%);
+            z-index: 0;
+            pointer-events: none;
+            filter: blur(60px);
+        }
 
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -170,15 +193,15 @@ HTML_TEMPLATE = """
             background: var(--scrollbar-thumb);
             border-radius: 20px;
         }
-        ::-webkit-scrollbar-thumb:hover { background: #334155; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(168, 85, 247, 0.3); }
 
         #sidebar-overlay {
             display: none;
             position: fixed;
             top: 0; left: 0;
             width: 100vw; height: 100dvh;
-            background: rgba(0, 0, 0, 0.5);
-            backdrop-filter: blur(2px);
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
             z-index: 40;
             opacity: 0;
             transition: opacity 0.3s ease;
@@ -186,53 +209,57 @@ HTML_TEMPLATE = """
         #sidebar-overlay.active { display: block; opacity: 1; }
 
         #sidebar { 
-            width: 260px; 
-            min-width: 260px;
+            width: 280px; 
+            min-width: 280px;
             background: var(--bg-sidebar); 
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border-right: 1px solid var(--border-color); 
             display: flex; 
             flex-direction: column; 
-            padding: 16px 12px; 
+            padding: 18px 14px; 
             z-index: 50;
             height: 100dvh;
             transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), margin-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 10px 0 30px rgba(0, 0, 0, 0.3);
         }
         
         body.sidebar-collapsed #sidebar {
-            margin-left: -260px;
+            margin-left: -280px;
         }
 
-        .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; padding: 0 4px; }
+        .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding: 0 4px; }
         
         .brand-logo-svg { 
-            width: 30px; height: 30px; 
-            filter: drop-shadow(0 0 8px rgba(239, 68, 68, 0.5));
+            width: 34px; height: 34px; 
+            filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.6));
             flex-shrink: 0;
         }
         
-        .brand h2 { font-size: 14px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
+        .brand h2 { font-size: 15px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
         .brand span { font-size: 10px; color: var(--text-muted); font-weight: 500; display: block; }
 
         .dev-badge {
-            background: rgba(99, 102, 241, 0.15);
-            border: 1px dashed var(--accent);
-            color: #a5b4fc;
+            background: rgba(168, 85, 247, 0.15);
+            border: 1px dashed rgba(168, 85, 247, 0.4);
+            color: #d8b4fe;
             font-size: 9px;
             padding: 2px 6px;
-            border-radius: 4px;
+            border-radius: 6px;
             margin-left: auto;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
 
         .btn-new-chat { 
-            background: rgba(255, 255, 255, 0.04); color: #ffffff; 
-            border: 1px solid var(--border-color); padding: 8px 12px; 
-            border-radius: 10px; font-size: 12px; font-weight: 600; 
-            cursor: pointer; display: flex; align-items: center; gap: 6px; 
-            margin-bottom: 14px; transition: all 0.2s ease; 
+            background: var(--accent-gradient); color: #ffffff; 
+            border: none; padding: 10px 14px; 
+            border-radius: 12px; font-size: 12px; font-weight: 600; 
+            cursor: pointer; display: flex; align-items: center; gap: 8px; 
+            margin-bottom: 16px; transition: all 0.2s ease; 
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
         }
-        .btn-new-chat:hover { background: rgba(255, 255, 255, 0.08); border-color: var(--border-hover); }
+        .btn-new-chat:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(168, 85, 247, 0.4); }
 
         .chats-header { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-muted); font-weight: 700; margin-bottom: 8px; padding: 0 4px; text-transform: uppercase; letter-spacing: 0.8px; }
         
@@ -240,104 +267,117 @@ HTML_TEMPLATE = """
         .chat-item { 
             background: rgba(255, 255, 255, 0.02); 
             border: 1px solid var(--border-color); 
-            border-radius: 8px; padding: 8px 10px; 
+            border-radius: 10px; padding: 10px 12px; 
             font-size: 12px; color: #cbd5e1; 
             display: flex; justify-content: space-between; align-items: center; 
-            cursor: pointer; transition: all 0.2s;
+            cursor: pointer; transition: all 0.2s ease;
         }
-        .chat-item.active { background: rgba(99, 102, 241, 0.15); border-color: var(--accent); color: #ffffff; }
-        .chat-item:hover { background: rgba(255, 255, 255, 0.06); color: #ffffff; }
-        .chat-item .close-btn { color: var(--text-muted); font-size: 14px; cursor: pointer; border-radius: 4px; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; }
-        .chat-item .close-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.1); }
+        .chat-item.active { background: rgba(168, 85, 247, 0.12); border-color: rgba(168, 85, 247, 0.4); color: #ffffff; box-shadow: 0 0 15px rgba(168, 85, 247, 0.1); }
+        .chat-item:hover { background: rgba(255, 255, 255, 0.05); border-color: var(--border-hover); color: #ffffff; }
+        .chat-item .close-btn { color: var(--text-muted); font-size: 14px; cursor: pointer; border-radius: 6px; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        .chat-item .close-btn:hover { color: #f87171; background: rgba(248, 113, 113, 0.15); }
 
-        .sidebar-footer { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border-color); }
-        .status-dot { width: 6px; height: 6px; background: #f59e0b; border-radius: 50%; box-shadow: 0 0 6px rgba(245, 158, 11, 0.6); }
+        .sidebar-footer { font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 14px; border-top: 1px solid var(--border-color); }
+        .status-dot { width: 7px; height: 7px; background: #a855f7; border-radius: 50%; box-shadow: 0 0 8px rgba(168, 85, 247, 0.8); }
 
-        #main { flex: 1; display: flex; flex-direction: column; background: var(--bg-main); position: relative; height: 100dvh; overflow: hidden; }
+        #main { flex: 1; display: flex; flex-direction: column; background: var(--bg-main); position: relative; height: 100dvh; overflow: hidden; z-index: 1; }
         
         #chat-header { 
-            height: 50px; min-height: 50px;
+            height: 56px; min-height: 56px;
             border-bottom: 1px solid var(--border-color); 
             display: flex; align-items: center; justify-content: space-between; 
-            padding: 0 16px; background: rgba(15, 17, 23, 0.85); 
-            backdrop-filter: blur(12px); z-index: 10;
+            padding: 0 20px; background: rgba(6, 7, 11, 0.6); 
+            backdrop-filter: blur(16px); z-index: 10;
         }
-        .header-left { display: flex; align-items: center; gap: 10px; }
+        .header-left { display: flex; align-items: center; gap: 12px; }
         
         .menu-toggle { 
-            background: rgba(255, 255, 255, 0.05); 
+            background: rgba(255, 255, 255, 0.03); 
             border: 1px solid var(--border-color); 
             color: #ffffff; 
-            border-radius: 8px; 
-            padding: 6px; 
+            border-radius: 10px; 
+            padding: 8px; 
             cursor: pointer; 
             display: flex; 
             align-items: center; 
             justify-content: center; 
-            transition: background 0.2s, border-color 0.2s;
+            transition: all 0.2s ease;
         }
-        .menu-toggle:hover { background: rgba(255, 255, 255, 0.1); border-color: var(--border-hover); }
+        .menu-toggle:hover { background: rgba(168, 85, 247, 0.1); border-color: var(--border-hover); }
         
-        #chat-header h3 { font-size: 14px; font-weight: 600; color: #ffffff; }
+        #chat-header h3 { font-size: 14px; font-weight: 600; color: #ffffff; letter-spacing: -0.2px; }
 
         #chat-container { 
-            flex: 1; overflow-y: auto; padding: 16px 16px 110px 16px; 
-            display: flex; flex-direction: column; gap: 16px; 
+            flex: 1; overflow-y: auto; padding: 20px 20px 130px 20px; 
+            display: flex; flex-direction: column; gap: 20px; 
             max-width: 900px; width: 100%; margin: 0 auto;
             position: relative;
+            z-index: 2;
         }
 
+        /* Премиальный экран приветствия */
         .welcome-screen {
             position: absolute;
-            top: 40%;
+            top: 45%;
             left: 50%;
             transform: translate(-50%, -50%);
             text-align: center;
             user-select: none;
             pointer-events: none;
             width: 90%;
-            max-width: 420px;
+            max-width: 460px;
             display: flex;
             flex-direction: column;
             align-items: center;
-            gap: 10px;
+            gap: 14px;
+            animation: fadeIn 0.5s ease-out;
         }
-        .welcome-avatar-svg {
-            width: 64px; height: 64px;
-            filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.6));
+        .welcome-avatar-glow {
+            position: relative;
+            padding: 16px;
+            border-radius: 24px;
+            background: rgba(168, 85, 247, 0.05);
+            border: 1px solid rgba(168, 85, 247, 0.2);
+            box-shadow: 0 0 40px rgba(168, 85, 247, 0.15);
             margin-bottom: 4px;
         }
-        .welcome-screen h1 { font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
-        .welcome-screen p { font-size: 13px; color: var(--text-muted); line-height: 1.4; }
+        .welcome-avatar-svg {
+            width: 56px; height: 56px;
+            filter: drop-shadow(0 0 16px rgba(168, 85, 247, 0.6));
+        }
+        .welcome-screen h1 { font-size: 22px; font-weight: 700; color: #ffffff; letter-spacing: -0.5px; }
+        .welcome-screen p { font-size: 13px; color: var(--text-muted); line-height: 1.5; }
         
-        .msg-row { display: flex; flex-direction: column; width: 100%; animation: fadeIn 0.25s ease-out; z-index: 2; }
+        .msg-row { display: flex; flex-direction: column; width: 100%; animation: fadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); z-index: 2; }
         .msg-row.user-row { align-items: flex-end; }
         .msg-row.bot-row { align-items: flex-start; }
 
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
         .msg-user { 
             background: var(--user-msg-bg); color: #ffffff; 
-            border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px 12px 2px 12px; 
-            padding: 10px 14px; font-size: 13px; line-height: 1.4; max-width: 85%; 
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); word-break: break-word;
+            border: 1px solid rgba(168, 85, 247, 0.25); border-radius: 16px 16px 4px 16px; 
+            padding: 12px 16px; font-size: 13px; line-height: 1.5; max-width: 85%; 
+            box-shadow: 0 8px 25px rgba(99, 102, 241, 0.15); word-break: break-word;
+            backdrop-filter: blur(10px);
         }
         
         .msg-bot { 
             background: var(--bot-msg-bg); border: 1px solid var(--border-color); 
-            color: #e2e8f0; border-radius: 12px 12px 12px 2px; 
-            padding: 12px 16px; font-size: 13px; line-height: 1.5; max-width: 90%; 
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2); word-break: break-word;
+            color: #e2e8f0; border-radius: 16px 16px 16px 4px; 
+            padding: 16px 20px; font-size: 13px; line-height: 1.6; max-width: 90%; 
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); word-break: break-word;
+            backdrop-filter: blur(16px);
         }
 
-        .msg-bot p { margin-bottom: 10px; }
+        .msg-bot p { margin-bottom: 12px; }
         .msg-bot p:last-child { margin-bottom: 0; }
         .msg-bot strong { color: #ffffff; font-weight: 700; }
-        .msg-bot ul, .msg-bot ol { margin: 6px 0 10px 18px; }
-        .msg-bot code { background: rgba(255, 255, 255, 0.08); padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #f472b6; }
-        .msg-bot pre { background: #090a0f; padding: 10px; border-radius: 6px; overflow-x: auto; margin: 8px 0; border: 1px solid var(--border-color); }
+        .msg-bot ul, .msg-bot ol { margin: 8px 0 12px 20px; }
+        .msg-bot code { background: rgba(255, 255, 255, 0.08); padding: 3px 6px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #f472b6; border: 1px solid rgba(255,255,255,0.05); }
+        .msg-bot pre { background: #040507; padding: 12px; border-radius: 10px; overflow-x: auto; margin: 10px 0; border: 1px solid var(--border-color); }
         
-        .file-preview-tag { display: inline-flex; align-items: center; gap: 5px; background: rgba(255, 255, 255, 0.1); padding: 3px 6px; border-radius: 4px; font-size: 11px; margin-bottom: 4px; }
+        .file-preview-tag { display: inline-flex; align-items: center; gap: 6px; background: rgba(168, 85, 247, 0.15); padding: 4px 8px; border-radius: 6px; font-size: 11px; margin-bottom: 6px; border: 1px solid rgba(168, 85, 247, 0.3); }
 
         .cancelled-container {
             display: flex;
@@ -350,8 +390,8 @@ HTML_TEMPLATE = """
             width: 100%;
             max-width: 85%;
             height: 1px;
-            background: rgba(255, 255, 255, 0.1);
-            margin: 6px 0 3px 0;
+            background: rgba(255, 255, 255, 0.08);
+            margin: 8px 0 4px 0;
         }
         .cancelled-text {
             font-size: 10px;
@@ -364,66 +404,91 @@ HTML_TEMPLATE = """
         .loader-box {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
             background: var(--bot-msg-bg);
             border: 1px solid var(--border-color);
-            border-radius: 12px 12px 12px 2px;
-            padding: 10px 14px;
+            border-radius: 16px 16px 16px 4px;
+            padding: 12px 18px;
             font-size: 13px;
             color: var(--text-muted);
+            backdrop-filter: blur(16px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
         }
         .spinner {
-            width: 14px; height: 14px;
-            border: 2px solid rgba(255,255,255,0.2);
-            border-top-color: var(--accent);
+            width: 16px; height: 16px;
+            border: 2px solid rgba(168,85,247,0.2);
+            border-top-color: #a855f7;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
 
+        /* Полностью переработанное поле ввода */
         #input-wrapper {
             position: absolute; bottom: 0; left: 0; right: 0; 
-            padding: 10px 14px; padding-bottom: calc(10px + env(safe-area-inset-bottom));
-            background: linear-gradient(180deg, rgba(9, 10, 15, 0) 0%, rgba(9, 10, 15, 0.95) 40%, var(--bg-main) 100%);
+            padding: 14px 20px; padding-bottom: calc(14px + env(safe-area-inset-bottom));
+            background: linear-gradient(180deg, rgba(6, 7, 11, 0) 0%, rgba(6, 7, 11, 0.85) 40%, var(--bg-main) 100%);
             z-index: 20;
         }
 
         #input-container { 
-            max-width: 900px; margin: 0 auto; background: var(--bg-sidebar); 
-            border: 1px solid var(--border-color); border-radius: 14px; 
-            padding: 6px 10px; display: flex; flex-direction: column; gap: 6px;
-            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-            transition: border-color 0.2s;
+            max-width: 900px; margin: 0 auto; 
+            background: rgba(15, 18, 28, 0.85); 
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid rgba(168, 85, 247, 0.2); 
+            border-radius: 18px; 
+            padding: 8px 12px; display: flex; flex-direction: column; gap: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5), 0 0 20px rgba(168, 85, 247, 0.08);
+            transition: all 0.3s ease;
+        }
+        #input-container:focus-within {
+            border-color: rgba(168, 85, 247, 0.5);
+            box-shadow: 0 10px 35px rgba(0, 0, 0, 0.6), 0 0 25px rgba(168, 85, 247, 0.18);
         }
 
-        #file-info-bar { display: none; align-items: center; justify-content: space-between; background: rgba(255, 255, 255, 0.05); padding: 4px 10px; border-radius: 6px; font-size: 11px; color: var(--text-muted); }
+        #file-info-bar { display: none; align-items: center; justify-content: space-between; background: rgba(168, 85, 247, 0.1); padding: 6px 12px; border-radius: 8px; font-size: 11px; color: #d8b4fe; border: 1px solid rgba(168, 85, 247, 0.2); }
         #file-info-bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 80%; }
-        #file-info-bar button { background: none; border: none; color: #f87171; cursor: pointer; font-size: 13px; }
+        #file-info-bar button { background: none; border: none; color: #f87171; cursor: pointer; font-size: 14px; transition: transform 0.2s; }
+        #file-info-bar button:hover { transform: scale(1.1); }
 
-        .input-row { display: flex; gap: 6px; align-items: center; width: 100%; }
+        .input-row { display: flex; gap: 8px; align-items: center; width: 100%; }
 
-        .mini-btn { background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-color); color: var(--text-muted); padding: 7px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
-        .mini-btn:hover { color: #ffffff; background: rgba(255, 255, 255, 0.1); border-color: var(--border-hover); }
+        .mini-btn { 
+            background: rgba(255, 255, 255, 0.03); 
+            border: 1px solid var(--border-color); 
+            color: var(--text-muted); 
+            padding: 9px; 
+            border-radius: 10px; 
+            cursor: pointer; 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            transition: all 0.2s ease; 
+        }
+        .mini-btn:hover { color: #ffffff; background: rgba(168, 85, 247, 0.15); border-color: rgba(168, 85, 247, 0.3); transform: translateY(-1px); }
 
-        #prompt-input { flex: 1; background: transparent; border: none; color: #ffffff; font-size: 14px; outline: none; min-width: 0; }
+        #prompt-input { flex: 1; background: transparent; border: none; color: #ffffff; font-size: 14px; outline: none; min-width: 0; padding: 4px 0; }
         #prompt-input::placeholder { color: var(--text-muted); }
         #prompt-input:disabled { opacity: 0.5; }
         
         .btn-action { 
-            background: var(--accent); color: #ffffff; border: none; border-radius: 8px; 
-            padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; 
-            transition: all 0.2s ease; flex-shrink: 0; display: flex; align-items: center; justify-content: center; min-width: 85px;
+            background: var(--accent-gradient); color: #ffffff; border: none; border-radius: 10px; 
+            padding: 10px 18px; font-size: 12px; font-weight: 600; cursor: pointer; 
+            transition: all 0.2s ease; flex-shrink: 0; display: flex; align-items: center; justify-content: center; min-width: 95px;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
         }
-        .btn-action:hover { background: var(--accent-hover); }
+        .btn-action:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(168, 85, 247, 0.4); }
         
-        /* Состояние отмены для кнопки */
         .btn-action.cancel-mode {
             background: var(--cancel-bg);
             border: 1px solid var(--cancel-border);
             color: var(--cancel-color);
+            box-shadow: 0 4px 15px rgba(248, 113, 113, 0.2);
         }
         .btn-action.cancel-mode:hover {
             background: rgba(248, 113, 113, 0.25);
+            box-shadow: 0 6px 20px rgba(248, 113, 113, 0.3);
         }
 
         @media (max-width: 768px) {
@@ -434,8 +499,9 @@ HTML_TEMPLATE = """
                 transform: translateX(-100%); 
             }
             #sidebar.mobile-open { transform: translateX(0); }
-            #chat-header { padding: 0 12px; }
-            #chat-container { padding: 12px 12px 100px 12px; }
+            #chat-header { padding: 0 14px; }
+            #chat-container { padding: 14px 14px 110px 14px; }
+            #input-wrapper { padding: 10px 14px; }
         }
     </style>
 </head>
@@ -518,8 +584,8 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
-        let chats = JSON.parse(localStorage.getItem('rubinov_chats_dev_v6') || '[]');
-        let currentChatId = localStorage.getItem('rubinov_active_chat_dev_v6') || null;
+        let chats = JSON.parse(localStorage.getItem('rubinov_chats_dev_v7') || '[]');
+        let currentChatId = localStorage.getItem('rubinov_active_chat_dev_v7') || null;
         let selectedFile = null;
         let activeController = null;
         let isGenerating = false;
@@ -534,8 +600,8 @@ HTML_TEMPLATE = """
         }
 
         function saveState() {
-            localStorage.setItem('rubinov_chats_dev_v6', JSON.stringify(chats));
-            localStorage.setItem('rubinov_active_chat_dev_v6', currentChatId);
+            localStorage.setItem('rubinov_chats_dev_v7', JSON.stringify(chats));
+            localStorage.setItem('rubinov_active_chat_dev_v7', currentChatId);
             renderChats();
         }
 
@@ -629,14 +695,16 @@ HTML_TEMPLATE = """
                 const welcome = document.createElement('div');
                 welcome.className = 'welcome-screen';
                 welcome.innerHTML = `
-                    <svg class="welcome-avatar-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M50 10 L85 35 L50 90 L15 35 Z" stroke="url(#rubyGrad)" stroke-width="4" fill="none" />
-                        <path d="M15 35 L85 35 M50 10 L32 35 M50 10 L68 35 M50 90 L32 35 M50 90 L68 35" stroke="url(#rubyGrad)" stroke-width="2.5" opacity="0.7" />
-                        <circle cx="50" cy="48" r="14" fill="#ff4b4b" opacity="0.25" />
-                        <path d="M42 45 Q46 40 50 45 Q54 40 58 45 Q60 52 50 56 Q40 52 42 45 Z" stroke="#ffffff" stroke-width="2.5" fill="none" />
-                    </svg>
+                    <div class="welcome-avatar-glow">
+                        <svg class="welcome-avatar-svg" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M50 10 L85 35 L50 90 L15 35 Z" stroke="url(#rubyGrad)" stroke-width="4" fill="none" />
+                            <path d="M15 35 L85 35 M50 10 L32 35 M50 10 L68 35 M50 90 L32 35 M50 90 L68 35" stroke="url(#rubyGrad)" stroke-width="2.5" opacity="0.7" />
+                            <circle cx="50" cy="48" r="14" fill="#ff4b4b" opacity="0.25" />
+                            <path d="M42 45 Q46 40 50 45 Q54 40 58 45 Q60 52 50 56 Q40 52 42 45 Z" stroke="#ffffff" stroke-width="2.5" fill="none" />
+                        </svg>
+                    </div>
                     <h1>Rubinov AI [Dev]</h1>
-                    <p>Кнопка отправки совмещена с отменой. Напишите сообщение.</p>
+                    <p>Премиальный интерфейс активирован. Задайте вопрос или отправьте изображение для анализа.</p>
                 `;
                 chatContainer.appendChild(welcome);
                 return;
