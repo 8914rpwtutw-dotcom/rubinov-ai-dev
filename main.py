@@ -16,7 +16,7 @@ try:
     from google.genai import types
     from aiogram import Bot, Dispatcher, F, types as aiogram_types
     from aiogram.filters import Command
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 except Exception as e:
     print(f"CRITICAL IMPORT ERROR: {e}")
     raise e
@@ -44,9 +44,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             telegram_id TEXT PRIMARY KEY,
             username TEXT,
-            tier TEXT DEFAULT 'free'
+            tier TEXT DEFAULT 'free',
+            is_banned INTEGER DEFAULT 0
         )
     ''')
+    # Добавим колонку is_banned на случай, если таблица уже существовала без неё
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass # Колонка уже есть
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS login_codes (
             code TEXT PRIMARY KEY,
@@ -78,7 +85,19 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     token = credentials.credentials
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("telegram_id")
+        telegram_id = payload.get("telegram_id")
+        
+        # Проверяем не забанен ли пользователь при запросах к API
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_banned FROM users WHERE telegram_id = ?", (telegram_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row[0] == 1:
+            raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован администратором.")
+            
+        return telegram_id
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен авторизации.")
 
@@ -96,15 +115,21 @@ def verify_login_code(code: str = Form(...)):
         raise HTTPException(status_code=400, detail="Неверный или несуществующий код.")
     
     telegram_id, expires_at = row
+    
+    # Проверка на бан
+    cursor.execute("SELECT tier, is_banned FROM users WHERE telegram_id = ?", (telegram_id,))
+    user_row = cursor.fetchone()
+    if user_row and user_row[1] == 1:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован администратором.")
+        
+    tier = user_row[0] if user_row else 'free'
+    
     if time.time() > expires_at:
         cursor.execute("DELETE FROM login_codes WHERE code = ?", (code,))
         conn.commit()
         conn.close()
         raise HTTPException(status_code=400, detail="Срок действия кода истек.")
-    
-    cursor.execute("SELECT tier FROM users WHERE telegram_id = ?", (telegram_id,))
-    user_row = cursor.fetchone()
-    tier = user_row[0] if user_row else 'free'
     
     cursor.execute("SELECT COUNT(*) FROM user_sessions WHERE telegram_id = ?", (telegram_id,))
     active_sessions_count = cursor.fetchone()[0]
@@ -212,7 +237,7 @@ HTML_TEMPLATE = """
     <div id="auth-modal" class="active">
         <div class="auth-card">
             <h2>Авторизация</h2>
-            <p style="font-size: 13px; color: #94a3b8; margin-top: 8px;">Запросите код в нашем Telegram-боте командой /login</p>
+            <p style="font-size: 13px; color: #94a3b8; margin-top: 8px;">Запросите код в нашем Telegram-боте</p>
             <input type="text" id="code-input" class="auth-input" placeholder="000000" maxlength="6">
             <button class="auth-btn" onclick="submitCode()">Войти</button>
         </div>
@@ -264,7 +289,7 @@ async def get_root():
     return HTML_TEMPLATE
 
 
-# --- TELEGRAM БОТ (ЗАПУСК ЧЕРЕЗ ФОНОВУЮ ЗАДАЧУ) ---
+# --- TELEGRAM БОТ ---
 async def start_telegram_bot():
     if not TELEGRAM_BOT_TOKEN:
         return
@@ -273,41 +298,74 @@ async def start_telegram_bot():
     dp = Dispatcher()
 
     admin_reply_targets = {}
+    waiting_for_support = set()
+    waiting_for_user_search = set()
+
+    def get_main_keyboard(is_admin: bool):
+        builder = ReplyKeyboardBuilder()
+        builder.button(text="🔐 Получить код")
+        if is_admin:
+            builder.button(text="👥 Пользователи")
+            builder.button(text="🔍 Найти по ID")
+            builder.button(text="📬 Тикеты")
+            builder.button(text="👑 Админ-панель")
+            builder.adjust(2, 2, 1)
+        else:
+            builder.button(text="🆘 Поддержка")
+            builder.adjust(2)
+        return builder.as_markup(resize_keyboard=True)
 
     @dp.message(Command("start"))
     async def cmd_start(m: aiogram_types.Message):
         t_id = str(m.from_user.id)
         uname = m.from_user.username or m.from_user.first_name
+        is_admin = (t_id == ADMIN_TELEGRAM_ID)
         
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (t_id, uname))
-        conn.commit()
+        cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier, is_banned) VALUES (?, ?, 'free', 0)", (t_id, uname))
+        
+        # Проверим бан
+        cursor.execute("SELECT is_banned FROM users WHERE telegram_id = ?", (t_id,))
+        row = cursor.fetchone()
         conn.close()
+        
+        if row and row[0] == 1 and not is_admin:
+            await m.answer("❌ Ваш аккаунт заблокирован администратором. Напишите в поддержку, если считаете, что это ошибка.")
+            return
 
-        if t_id == ADMIN_TELEGRAM_ID:
+        if is_admin:
             await m.answer(
-                "👑 **Панель Администратора**\n\n"
-                "📌 **Доступные команды:**\n"
-                "👥 /users — список всех пользователей (выдача/снятие VIP)\n"
-                "📬 /tickets — посмотреть активные запросы в поддержку"
+                "👑 **Панель Администратора активирована**\n\n"
+                "Используйте кнопки ниже для быстрого доступа к управлению:",
+                reply_markup=get_main_keyboard(True),
+                parse_mode="Markdown"
             )
         else:
             await m.answer(
                 "👋 Добро пожаловать в **Rubinov AI**!\n\n"
-                "📌 **Команды:**\n"
-                "👉 /login — получить код для входа на сайт\n"
-                "🆘 /support [текст] — написать в техническую поддержку"
+                "Используйте кнопки на клавиатуре снизу для получения кода или связи с поддержкой.",
+                reply_markup=get_main_keyboard(False),
+                parse_mode="Markdown"
             )
 
-    @dp.message(Command("login"))
-    async def cmd_login(m: aiogram_types.Message):
+    @dp.message(F.text == "🔐 Получить код")
+    async def btn_login(m: aiogram_types.Message):
         t_id = str(m.from_user.id)
         uname = m.from_user.username or m.from_user.first_name
         
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier) VALUES (?, ?, 'free')", (t_id, uname))
+        
+        # Проверка на бан
+        cursor.execute("SELECT is_banned FROM users WHERE telegram_id = ?", (t_id,))
+        row = cursor.fetchone()
+        if row and row[0] == 1 and t_id != ADMIN_TELEGRAM_ID:
+            conn.close()
+            await m.answer("❌ Вы забанены администратором. Получение кодов недоступно.")
+            return
+
+        cursor.execute("INSERT OR IGNORE INTO users (telegram_id, username, tier, is_banned) VALUES (?, ?, 'free', 0)", (t_id, uname))
         conn.commit()
         
         code = str(random.randint(100000, 999999))
@@ -317,41 +375,33 @@ async def start_telegram_bot():
         
         await m.answer(f"🔐 Ваш код для входа на сайт:\n\n`{code}`\n\n⚠️ *Действителен 1 минуту.*", parse_mode="Markdown")
 
-    @dp.message(Command("support"))
-    async def cmd_support(m: aiogram_types.Message):
-        t_id = str(m.from_user.id)
-        uname = m.from_user.username or m.from_user.first_name
-        text_parts = m.text.split(maxsplit=1)
-        
-        if len(text_parts) < 2:
-            await m.answer("⚠️ Напишите ваш вопрос вместе с командой. Пример:\n`/support Помогите разобраться со входом`", parse_mode="Markdown")
+    @dp.message(F.text == "🆘 Поддержка")
+    async def btn_support_prompt(m: aiogram_types.Message):
+        waiting_for_support.add(m.from_user.id)
+        await m.answer("💬 Опишите вашу проблему или задайте вопрос одним сообщением, и мы передадим его администратору:")
+
+    @dp.message(F.text == "👑 Админ-панель")
+    async def btn_admin_panel(m: aiogram_types.Message):
+        if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
             return
-            
-        support_text = text_parts[1]
-        
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO support_tickets (telegram_id, username, message, created_at) VALUES (?, ?, ?, ?)", 
-                       (t_id, uname, support_text, time.time()))
-        conn.commit()
-        conn.close()
-        
-        await m.answer("✅ Ваше обращение отправлено в поддержку! Администратор скоро ответит вам.")
+        await m.answer(
+            "👑 **Административная панель управления**\n\n"
+            "• **👥 Пользователи** — список всех пользователей, управление VIP и банами.\n"
+            "• **🔍 Найти по ID** — быстро найти пользователя по его Telegram ID.\n"
+            "• **📬 Тикеты** — проверка обращений в поддержку.",
+            reply_markup=get_main_keyboard(True),
+            parse_mode="Markdown"
+        )
 
-        if ADMIN_TELEGRAM_ID:
-            user_label = f"@{uname}" if m.from_user.username else uname
-            notif_text = f"🆘 **Новый запрос в поддержку!**\n\n👤 От: {user_label} (ID: `{t_id}`)\n💬 Текст: {support_text}"
-            
-            builder = InlineKeyboardBuilder()
-            builder.button(text="✍️ Ответить", callback_data=f"ans_{t_id}")
-            
-            try:
-                await bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=notif_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
-            except Exception:
-                pass
+    @dp.message(F.text == "🔍 Найти по ID")
+    async def btn_search_user_prompt(m: aiogram_types.Message):
+        if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
+            return
+        waiting_for_user_search.add(m.from_user.id)
+        await m.answer("🔍 Введите Telegram ID пользователя, которого хотите найти:", reply_markup=get_main_keyboard(True))
 
-    @dp.message(Command("tickets"))
-    async def cmd_tickets(m: aiogram_types.Message):
+    @dp.message(F.text == "📬 Тикеты")
+    async def btn_tickets(m: aiogram_types.Message):
         if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
             return
 
@@ -383,14 +433,14 @@ async def start_telegram_bot():
             )
             await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-    @dp.message(Command("users"))
-    async def cmd_admin_users(m: aiogram_types.Message):
+    @dp.message(F.text == "👥 Пользователи")
+    async def btn_admin_users(m: aiogram_types.Message):
         if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
             return
 
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id, username, tier FROM users")
+        cursor.execute("SELECT telegram_id, username, tier, is_banned FROM users")
         rows = cursor.fetchall()
         conn.close()
 
@@ -401,8 +451,8 @@ async def start_telegram_bot():
         await m.answer(f"📊 **Всего зарегистрировано пользователей:** {len(rows)}", parse_mode="Markdown")
 
         for r in rows:
-            t_id, uname, tier = r[0], r[1] or "Без имени", r[2]
-            status_icon = "⭐ VIP" if tier == 'vip' else "👤 Free"
+            t_id, uname, tier, is_banned = r[0], r[1] or "Без имени", r[2], r[3]
+            status_icon = "🔴 Забанен" if is_banned == 1 else ("⭐ VIP" if tier == 'vip' else "👤 Free")
             
             builder = InlineKeyboardBuilder()
             if tier == 'free':
@@ -410,34 +460,73 @@ async def start_telegram_bot():
             else:
                 builder.button(text="❌ Забрать VIP", callback_data=f"setfree_{t_id}")
 
+            if is_banned == 1:
+                builder.button(text="🟢 Разбанить", callback_data=f"unban_{t_id}")
+            else:
+                builder.button(text="🔴 Забанить", callback_data=f"ban_{t_id}")
+            
+            builder.adjust(2)
+
             card_text = f"👤 <b>{uname}</b>\nID: <code>{t_id}</code>\nСтатус: <b>{status_icon}</b>"
             await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-    @dp.callback_query(F.data.startswith("setvip_") | F.data.startswith("setfree_"))
-    async def process_tier_change(callback: aiogram_types.CallbackQuery):
+    # Обработчики изменения тарифов и банов
+    @dp.callback_query(F.data.startswith("setvip_") | F.data.startswith("setfree_") | F.data.startswith("ban_") | F.data.startswith("unban_"))
+    async def process_user_action(callback: aiogram_types.CallbackQuery):
         if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
             return await callback.answer("Нет прав", show_alert=True)
 
         action, t_id = callback.data.split("_")
-        new_tier = 'vip' if action == 'setvip' else 'free'
-
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET tier = ? WHERE telegram_id = ?", (new_tier, t_id))
-        conn.commit()
-        conn.close()
 
-        status_msg = "⭐ VIP статус выдан!" if new_tier == 'vip' else "👤 Статус изменен на Free."
-        await callback.message.edit_text(callback.message.text + f"\n\n✅ <i>{status_msg}</i>", parse_mode="HTML")
-        await callback.answer(status_msg)
+        if action == "setvip":
+            cursor.execute("UPDATE users SET tier = 'vip' WHERE telegram_id = ?", (t_id,))
+            conn.commit()
+            conn.close()
+            await callback.answer("⭐ VIP выдан!")
+            await callback.message.edit_text(callback.message.text + "\n\n✅ <i>Статус изменен на VIP</i>", parse_mode="HTML")
+            try:
+                await bot.send_message(chat_id=t_id, text="🎉 Поздравляем! Администратор выдал вам **VIP-статус**.")
+            except Exception:
+                pass
 
-        try:
-            if new_tier == 'vip':
-                await bot.send_message(chat_id=t_id, text="🎉 Поздравляем! Администратор выдал вам **VIP-статус** (лимит устройств увеличен до 3).")
-            else:
+        elif action == "setfree":
+            cursor.execute("UPDATE users SET tier = 'free' WHERE telegram_id = ?", (t_id,))
+            conn.commit()
+            conn.close()
+            await callback.answer("👤 Статус изменен на Free")
+            await callback.message.edit_text(callback.message.text + "\n\n✅ <i>Статус изменен на Free</i>", parse_mode="HTML")
+            try:
                 await bot.send_message(chat_id=t_id, text="ℹ️ Ваш статус был изменен администратором на **Free**.")
-        except Exception:
-            pass
+            except Exception:
+                pass
+
+        elif action == "ban":
+            cursor.execute("UPDATE users SET is_banned = 1 WHERE telegram_id = ?", (t_id,))
+            conn.commit()
+            conn.close()
+            await callback.answer("🔴 Пользователь забанен!")
+            await callback.message.edit_text(callback.message.text + "\n\n❌ <i>ПОЛЬЗОВАТЕЛЬ ЗАБАНЕН</i>", parse_mode="HTML")
+            try:
+                await bot.send_message(
+                    chat_id=t_id, 
+                    text="❌ **Вы заблокированы администратором.**\n\nВы больше не можете получать коды для входа и использовать ИИ. Напишите в поддержку, если считаете это ошибкой.",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+
+        elif action == "unban":
+            cursor.execute("UPDATE users SET is_banned = 0 WHERE telegram_id = ?", (t_id,))
+            conn.commit()
+            conn.close()
+            await callback.answer("🟢 Пользователь разбанен!")
+            await callback.message.edit_text(callback.message.text + "\n\n✅ <i>ПОЛЬЗОВАТЕЛЬ РАЗБАНЕН</i>", parse_mode="HTML")
+            try:
+                await bot.send_message(chat_id=t_id, text="✅ **Ваш аккаунт разблокирован администратором!** Можете пользоваться ботом и сайтом.")
+            except Exception:
+                pass
 
     @dp.callback_query(F.data.startswith("delticket_"))
     async def process_delete_ticket(callback: aiogram_types.CallbackQuery):
@@ -466,8 +555,22 @@ async def start_telegram_bot():
         await callback.answer()
 
     @dp.message()
-    async def admin_chat_handler(m: aiogram_types.Message):
+    async def global_message_handler(m: aiogram_types.Message):
         t_id = str(m.from_user.id)
+        uname = m.from_user.username or m.from_user.first_name
+
+        # Проверка бана для всех обычных текстовых сообщений
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_banned FROM users WHERE telegram_id = ?", (t_id,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row and row[0] == 1 and t_id != ADMIN_TELEGRAM_ID:
+            await m.answer("❌ Ваш аккаунт заблокирован.")
+            return
+
+        # Обработка ответа админа на тикет
         if t_id == ADMIN_TELEGRAM_ID and t_id in admin_reply_targets:
             target_user_id = admin_reply_targets.pop(t_id)
             try:
@@ -475,8 +578,71 @@ async def start_telegram_bot():
                 await m.answer("✅ Ответ успешно доставлен пользователю!")
             except Exception as e:
                 await m.answer(f"❌ Ошибка отправки: {e}")
+            return
 
-    print("Bot started with background task safely...")
+        # Обработка поиска пользователя по введенному ID
+        if t_id == ADMIN_TELEGRAM_ID and t_id in waiting_for_user_search:
+            waiting_for_user_search.remove(t_id)
+            search_query = m.text.strip()
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id, username, tier, is_banned FROM users WHERE telegram_id = ?", (search_query,))
+            row = cursor.fetchone()
+            conn.close()
+
+            if not row:
+                await m.answer(f"❌ Пользователь с ID `{search_query}` не найден в базе данных.", parse_mode="Markdown")
+                return
+
+            found_t_id, found_uname, found_tier, found_banned = row[0], row[1] or "Без имени", row[2], row[3]
+            status_icon = "🔴 Забанен" if found_banned == 1 else ("⭐ VIP" if found_tier == 'vip' else "👤 Free")
+            
+            builder = InlineKeyboardBuilder()
+            if found_tier == 'free':
+                builder.button(text="⭐ Выдать VIP", callback_data=f"setvip_{found_t_id}")
+            else:
+                builder.button(text="❌ Забрать VIP", callback_data=f"setfree_{found_t_id}")
+
+            if found_banned == 1:
+                builder.button(text="🟢 Разбанить", callback_data=f"unban_{found_t_id}")
+            else:
+                builder.button(text="🔴 Забанить", callback_data=f"ban_{found_t_id}")
+            
+            builder.adjust(2)
+
+            card_text = f"🔎 **Результат поиска:**\n\n👤 <b>{found_uname}</b>\nID: <code>{found_t_id}</code>\nСтатус: <b>{status_icon}</b>"
+            await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
+            return
+
+        # Обработка отправки тикета поддержки пользователем
+        if m.from_user.id in waiting_for_support:
+            waiting_for_support.remove(m.from_user.id)
+            support_text = m.text
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO support_tickets (telegram_id, username, message, created_at) VALUES (?, ?, ?, ?)", 
+                           (t_id, uname, support_text, time.time()))
+            conn.commit()
+            conn.close()
+            
+            await m.answer("✅ Ваше обращение отправлено в поддержку! Администратор скоро ответит вам.")
+
+            if ADMIN_TELEGRAM_ID:
+                user_label = f"@{uname}" if m.from_user.username else uname
+                notif_text = f"🆘 **Новый запрос в поддержку!**\n\n👤 От: {user_label} (ID: `{t_id}`)\n💬 Текст: {support_text}"
+                
+                builder = InlineKeyboardBuilder()
+                builder.button(text="✍️ Ответить", callback_data=f"ans_{t_id}")
+                
+                try:
+                    await bot.send_message(chat_id=ADMIN_TELEGRAM_ID, text=notif_text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+                except Exception:
+                    pass
+            return
+
+    print("Bot started with ban/unban system successfully...")
     try:
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
@@ -484,7 +650,6 @@ async def start_telegram_bot():
 
 @app.on_event("startup")
 async def startup_event():
-    # Запускаем бота в фоновой задаче, чтобы FastAPI мгновенно открыл порт для Render
     asyncio.create_task(start_telegram_bot())
 
 if __name__ == "__main__":
