@@ -2,8 +2,8 @@ import os
 import time
 import asyncio
 import sqlite3
-import threading
 from typing import Optional
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Cookie, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -52,13 +52,26 @@ def init_db():
 init_db()
 
 # --- TELEGRAM БОТ ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-app = FastAPI()
+# --- LIFESPAN ДЛЯ СОВМЕСТНОГО ЗАПУСКА FASTAPI И BOT ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Запускаем поллинг бота в фоновой задаче FastAPI event loop
+    polling_task = asyncio.create_task(dp.start_polling(bot))
+    yield
+    polling_task.cancel()
+    try:
+        await polling_task
+    except asyncio.CancelledError:
+        pass
+    await bot.session.close()
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,16 +81,23 @@ app.add_middleware(
 )
 
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
+current_key_idx = 0
 current_model_idx = 0
 
-def get_gemini_client():
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY_1")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY не найден в переменных окружения.")
-    return genai.Client(api_key=api_key.strip())
+def get_api_keys():
+    keys = [
+        os.getenv("GEMINI_KEY_1"),
+        os.getenv("GEMINI_KEY_2"),
+        os.getenv("GEMINI_KEY_3"),
+        os.getenv("GEMINI_API_KEY")
+    ]
+    return [k.strip() for k in keys if k and k.strip()]
+
+def get_gemini_client(api_key: str):
+    return genai.Client(api_key=api_key)
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
-    global current_model_idx
+    global current_key_idx, current_model_idx
     
     lowered = prompt.lower()
     if "нарисуй" in lowered or "draw" in lowered or "сгенерируй" in lowered:
@@ -96,17 +116,26 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
     <a href="{img_url}" target="_blank" download="rubinov_ai.jpg" style="display:inline-flex; align-items: center; gap: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:600; box-shadow: 0 4px 20px rgba(99, 102, 241, 0.35);">📥 Скачать в высоком разрешении</a>
 </div>"""
 
+    api_keys = get_api_keys()
+    if not api_keys:
+        raise HTTPException(status_code=500, detail="API-ключи не найдены в переменных окружения.")
+
+    num_keys = len(api_keys)
+    num_models = len(MODELS)
+    total_attempts = num_keys * num_models * 2
+
     contents = []
     if file_bytes and mime_type:
         contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
     if prompt:
         contents.append(prompt)
 
-    num_models = len(MODELS)
-    for attempt in range(num_models * 2):
+    for attempt in range(total_attempts):
+        active_key = api_keys[current_key_idx % num_keys]
         active_model = MODELS[current_model_idx % num_models]
+
         try:
-            client = get_gemini_client()
+            client = get_gemini_client(active_key)
             response = client.models.generate_content(model=active_model, contents=contents)
             return response.text
         except APIError as e:
@@ -115,13 +144,13 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
                 time.sleep(0.3)
                 continue
             else:
-                raise HTTPException(status_code=500, detail=f"Ошибка Gemini API: {str(e)}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Ошибка генерации: {str(e)}")
+                break
+        except Exception:
+            break
 
     raise HTTPException(status_code=500, detail="Сервис ИИ перегружен. Повторите попытку.")
 
-# --- TELEGRAM БОТ (ХЕНДЛЕРЫ) ---
+# --- TELEGRAM БОТ (ЛОГИКА И КНОПКИ) ---
 @dp.message(Command("start"))
 async def cmd_start(message: aiogram_types.Message):
     user_id = message.from_user.id
@@ -153,13 +182,16 @@ async def cmd_start(message: aiogram_types.Message):
         keyboard.inline_keyboard.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
 
     await message.answer(
-        f"👋 Добро пожаловать в **Rubinov AI**!\nСтатус: {vip_status}\n\nНапишите мне любой вопрос прямо здесь или используйте кнопки ниже:",
+        f"👋 Добро пожаловать в **Rubinov AI**!\nСтатус: {vip_status}\n\nВыберите действие в меню ниже:",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
 
 @dp.callback_query(F.data == "generate_code")
 async def process_generate_code(callback: aiogram_types.CallbackQuery):
+    # Сразу гасим анимацию загрузки на кнопке, чтобы она не висела
+    await callback.answer("Генерируем код...")
+    
     user_id = callback.from_user.id
     import random
     code = "".join(random.choices("0123456789", k=6))
@@ -178,13 +210,11 @@ async def process_generate_code(callback: aiogram_types.CallbackQuery):
         )
     except Exception as e:
         print(f"Auth code error: {e}")
-        
-    await callback.answer("Код сгенерирован!")
 
 @dp.callback_query(F.data == "create_ticket")
 async def process_ticket_start(callback: aiogram_types.CallbackQuery):
-    await callback.message.answer("✍️ Отправьте ваше сообщение в поддержку одним сообщением:", parse_mode="Markdown")
     await callback.answer()
+    await callback.message.answer("✍️ Отправьте ваше сообщение в поддержку одним сообщением:", parse_mode="Markdown")
 
 @dp.callback_query(F.data == "admin_panel")
 async def process_admin_panel(callback: aiogram_types.CallbackQuery):
@@ -192,12 +222,12 @@ async def process_admin_panel(callback: aiogram_types.CallbackQuery):
         await callback.answer("⛔ У вас нет доступа!", show_alert=True)
         return
     
+    await callback.answer()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_users")],
         [InlineKeyboardButton(text="🔍 Найти по ID", callback_data="admin_search_prompt")]
     ])
     await callback.message.answer("🛠 **Панель администратора:**", reply_markup=keyboard, parse_mode="Markdown")
-    await callback.answer()
 
 @dp.callback_query(F.data == "admin_users")
 async def process_admin_users(callback: aiogram_types.CallbackQuery):
@@ -205,6 +235,7 @@ async def process_admin_users(callback: aiogram_types.CallbackQuery):
         await callback.answer("⛔ Доступ запрещен", show_alert=True)
         return
     
+    await callback.answer()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT telegram_id, username, is_vip, is_banned FROM users LIMIT 10")
@@ -218,14 +249,13 @@ async def process_admin_users(callback: aiogram_types.CallbackQuery):
         text += f"{vip_icon} {ban_icon} ID: `{r[0]}` | @{r[1] or 'no_username'}\n"
 
     await callback.message.answer(text, parse_mode="Markdown")
-    await callback.answer()
 
 @dp.callback_query(F.data == "admin_search_prompt")
 async def process_search_prompt(callback: aiogram_types.CallbackQuery):
     if callback.from_user.id != ADMIN_TELEGRAM_ID:
         return
-    await callback.message.answer("🔍 Отправьте команду в формате:\n`/user [TELEGRAM_ID]` для управления пользователем.", parse_mode="Markdown")
     await callback.answer()
+    await callback.message.answer("🔍 Отправьте команду в формате:\n`/user [TELEGRAM_ID]` для управления пользователем.", parse_mode="Markdown")
 
 @dp.message(Command("user"))
 async def cmd_manage_user(message: aiogram_types.Message):
@@ -321,32 +351,6 @@ async def process_adm_action(callback: aiogram_types.CallbackQuery):
         f"✅ Статус пользователя `{target_id}` обновлен!\n• VIP: {'Да' if is_vip else 'Нет'}\n• Бан: {'Да' if is_banned else 'Нет'}",
         parse_mode="Markdown"
     )
-
-# Обработка обычных текстовых сообщений от пользователя в боте
-@dp.message(F.text)
-async def handle_telegram_text(message: aiogram_types.Message):
-    if message.text.startswith("/"):
-        return
-    
-    user_id = message.from_user.id
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT is_banned FROM users WHERE telegram_id = ?", (user_id,))
-    row = cursor.fetchone()
-    conn.close()
-
-    if row and row[0]:
-        await message.answer("❌ Вы заблокированы.")
-        return
-
-    processing_msg = await message.answer("⏳ Думаю над ответом...")
-    try:
-        ai_response = get_gemini_response(message.text)
-        # Очищаем теги разметки под формат телеграма, если нужно, или шлем как текст
-        clean_text = ai_response.replace("<div style='margin-top:14px;'>", "").replace("</div>", "").replace("<img", "🖼 [Изображение]").replace("</a", "")
-        await bot.edit_message_text(clean_text[:4000], chat_id=message.chat.id, message_id=processing_msg.message_id)
-    except Exception as e:
-        await bot.edit_message_text(f"❌ Ошибка: {str(e)}", chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 # --- API МАРШРУТЫ ---
 @app.post("/api/auth/verify")
@@ -962,10 +966,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    def start_bot():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(dp.start_polling(bot))
-
-    threading.Thread(target=start_bot, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
