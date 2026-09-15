@@ -137,19 +137,23 @@ async def cmd_start(message: types.Message):
 @dp.message(F.text.contains("Получить код"))
 async def btn_get_code(message: types.Message):
     tg_id = str(message.from_user.id)
+    username = message.from_user.username or "user"
+    
+    register_user_if_not_exists(tg_id, username)
+    
     status = check_user_status(tg_id)
     if status["is_banned"]:
         await message.answer("⛔ Вы забанены.")
         return
 
     code = str(random.randint(100000, 999900))
-    expires_at = time.time() + 300
+    expires_at = time.time() + 900  # 15 минут
     save_auth_code(tg_id, code, expires_at)
     
     await message.answer(
         f"🔑 Ваш код для входа на сайт:\n\n"
         f"<code>{code}</code>\n\n"
-        f"⏰ Действителен 5 минут. Введите его на сайте.",
+        f"⏰ Действителен 15 минут. Введите его на сайте.",
         parse_mode="HTML"
     )
 
@@ -275,11 +279,12 @@ def api_get_status(telegram_id: str):
 
 @app.post("/api/auth/verify-code")
 def verify_code(code: str = Form(...)):
-    telegram_id = find_user_by_auth_code(code.strip())
+    clean_code = code.strip()
+    telegram_id = find_user_by_auth_code(clean_code)
     if telegram_id:
         save_auth_code(telegram_id, "", 0)
         return {"status": "success", "telegram_id": telegram_id, "user": check_user_status(telegram_id)}
-    raise HTTPException(status_code=400, detail="Неверный код или истекло время (5 минут).")
+    raise HTTPException(status_code=400, detail="Неверный код или истекло время (15 минут).")
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
     global current_key_idx, current_model_idx
