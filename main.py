@@ -119,6 +119,14 @@ def get_all_tickets():
     conn.close()
     return rows
 
+def get_all_users_count_and_list():
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT telegram_id, username, is_banned, is_vip FROM users ORDER BY telegram_id DESC LIMIT 15")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
 
 # ==================== TELEGRAM БОТ ====================
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -132,6 +140,7 @@ def get_main_keyboard(is_admin: bool = False):
         [KeyboardButton(text="🔑 Получить код"), KeyboardButton(text="🎫 Тикеты")],
     ]
     if is_admin:
+        keyboard.append([KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="🔍 Найти по ID")])
         keyboard.append([KeyboardButton(text="👑 Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -152,7 +161,7 @@ async def cmd_start(message: types.Message):
         reply_markup=get_main_keyboard(is_admin)
     )
 
-@dp.message(F.text == "🔑 Получить код")
+@dp.message(F.text.contains("Получить код"))
 async def btn_get_code(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
@@ -175,13 +184,12 @@ async def btn_get_code(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text == "🎫 Тикеты")
+@dp.message(F.text.contains("Тикеты"))
 async def btn_tickets(message: types.Message):
     tg_id = str(message.from_user.id)
     username = message.from_user.username or "user"
     register_user_if_not_exists(tg_id, username)
     
-    # Если нажал админ — показываем список тикетов
     if tg_id == str(ADMIN_ID):
         tickets = get_all_tickets()
         if not tickets:
@@ -198,7 +206,6 @@ async def btn_tickets(message: types.Message):
         await message.answer(text, parse_mode="HTML")
         return
 
-    # Если обычный пользователь — активируем режим ожидания тикета
     set_waiting_for_ticket(tg_id, 1)
     await message.answer(
         "💬 <b>Создание тикета в поддержку:</b>\n\n"
@@ -206,13 +213,59 @@ async def btn_tickets(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text == "👑 Админ-панель")
+@dp.message(F.text.contains("Пользователи"))
+async def btn_users_list(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID): return
+    users = get_all_users_count_and_list()
+    if not users:
+        await message.answer("📭 Пользователей пока нет.")
+        return
+    text = "👥 <b>Последние пользователи в базе:</b>\n\n"
+    for u_id, u_name, u_ban, u_vip in users:
+        status_tags = []
+        if u_ban: status_tags.append("⛔ БАН")
+        if u_vip: status_tags.append("⭐ VIP")
+        st_str = f" ({' | '.join(status_tags)})" if status_tags else ""
+        text += f"• <code>{u_id}</code> — @{u_name}{st_str}\n"
+    await message.answer(text, parse_mode="HTML")
+
+@dp.message(F.text.contains("Найти по ID"))
+async def btn_search_user_prompt(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID): return
+    await message.answer(
+        "🔍 <b>Поиск пользователя:</b>\n"
+        "Отправьте команду в формате:\n<code>/user [TELEGRAM_ID]</code>",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text.contains("Админ-панель"))
 async def btn_admin_panel(message: types.Message):
     tg_id = str(message.from_user.id)
     if tg_id != str(ADMIN_ID): return
     await message.answer(
         "👑 <b>Панель администратора:</b>\n"
-        "• /ban [ID]\n• /unban [ID]\n• /vip [ID]\n• /unvip [ID]\n• /reply [ID] [текст]",
+        "• /ban [ID] — забанить\n"
+        "• /unban [ID] — разбанить\n"
+        "• /vip [ID] — выдать VIP\n"
+        "• /unvip [ID] — снять VIP\n"
+        "• /user [ID] — инфо о пользователе\n"
+        "• /reply [ID] [текст] — ответить на тикет",
+        parse_mode="HTML"
+    )
+
+@dp.message(Command("user"))
+async def cmd_user_info(message: types.Message):
+    if str(message.from_user.id) != str(ADMIN_ID): return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.answer("❌ Формат: /user [ID]")
+        return
+    target_id = args[1]
+    status = check_user_status(target_id)
+    await message.answer(
+        f"👤 <b>Информация о пользователе <code>{target_id}</code>:</b>\n"
+        f"• Забанен: {'Да' if status['is_banned'] else 'Нет'}\n"
+        f"• VIP статус: {'Активен' if status['is_vip'] else 'Нет'}",
         parse_mode="HTML"
     )
 
@@ -222,7 +275,8 @@ async def cmd_ban(message: types.Message):
     args = message.text.split()
     if len(args) < 2: return
     set_user_ban(args[1], 1)
-    await bot.send_message(int(args[1]), "❌ Вы забанены.")
+    try: await bot.send_message(int(args[1]), "❌ Вы забанены.")
+    except: pass
     await message.answer(f"✅ Забанен {args[1]}")
 
 @dp.message(Command("unban"))
@@ -231,7 +285,8 @@ async def cmd_unban(message: types.Message):
     args = message.text.split()
     if len(args) < 2: return
     set_user_ban(args[1], 0)
-    await bot.send_message(int(args[1]), "✅ Вы разбанены.")
+    try: await bot.send_message(int(args[1]), "✅ Вы разбанены.")
+    except: pass
     await message.answer(f"✅ Разбанен {args[1]}")
 
 @dp.message(Command("vip"))
@@ -240,7 +295,8 @@ async def cmd_vip(message: types.Message):
     args = message.text.split()
     if len(args) < 2: return
     set_user_vip(args[1], 1)
-    await bot.send_message(int(args[1]), "⭐ Вам выдан VIP!")
+    try: await bot.send_message(int(args[1]), "⭐ Вам выдан VIP статус!")
+    except: pass
     await message.answer(f"⭐ VIP выдан {args[1]}")
 
 @dp.message(Command("unvip"))
@@ -249,7 +305,8 @@ async def cmd_unvip(message: types.Message):
     args = message.text.split()
     if len(args) < 2: return
     set_user_vip(args[1], 0)
-    await bot.send_message(int(args[1]), "ℹ️ VIP снят.")
+    try: await bot.send_message(int(args[1]), "ℹ️ VIP статус снят.")
+    except: pass
     await message.answer(f"ℹ️ VIP снят с {args[1]}")
 
 @dp.message(Command("reply"))
@@ -402,7 +459,6 @@ HTML_TEMPLATE = """
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
         body { background: var(--bg-base); color: var(--text-main); height: 100dvh; display: flex; overflow: hidden; }
 
-        /* Оверлей авторизации */
         #auth-overlay {
             position: fixed; inset: 0; background: rgba(10, 11, 15, 0.9); backdrop-filter: blur(12px);
             z-index: 9999; display: flex; align-items: center; justify-content: center;
@@ -426,7 +482,6 @@ HTML_TEMPLATE = """
             color: #fff; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer;
         }
 
-        /* Сайбар */
         aside {
             width: 280px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color);
             display: flex; flex-direction: column; padding: 16px; gap: 16px;
@@ -446,7 +501,6 @@ HTML_TEMPLATE = """
         }
         .chat-row.active { background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3); color: #fff; }
 
-        /* Основной блок чата */
         main { flex: 1; display: flex; flex-direction: column; background: var(--bg-chat); position: relative; }
         header {
             height: 60px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center;
