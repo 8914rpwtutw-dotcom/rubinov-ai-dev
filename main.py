@@ -2,7 +2,7 @@ import os
 import time
 import random
 import sqlite3
-import threading
+import asyncio
 import urllib.parse
 from typing import Optional
 
@@ -437,54 +437,52 @@ async def get_root():
     return HTML_TEMPLATE
 
 
-# --- ВСТРОЕННЫЙ TELEGRAM-БОТ (ОБРАБОТКА /login) ---
-async def start_telegram_bot():
-    if not TELEGRAM_BOT_TOKEN:
-        print("Telegram bot token not found, bot disabled.")
-        return
-    
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    dp = Dispatcher()
-
-    @dp.message(Command("start"))
-    async def cmd_start(message: aiogram_types.Message):
-        await message.answer(
-            "👋 Привет! Я бот-помощник **Rubinov AI**.\n\n"
-            "Чтобы войти в свой веб-кабинет, отправьте мне команду:\n👉 /login"
-        )
-
-    @dp.message(Command("login"))
-    async def cmd_login(message: aiogram_types.Message):
-        telegram_id = str(message.from_user.id)
-        username = message.from_user.username or message.from_user.first_name
-        
-        # Генерируем случайный 6-значный код
-        code = str(random.randint(100000, 999999))
-        expires_at = time.time() + 60  # код действителен 1 минуту
-        
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO users (telegram_id, username) VALUES (?, ?)", (telegram_id, username))
-        cursor.execute("INSERT OR REPLACE INTO login_codes (code, telegram_id, expires_at) VALUES (?, ?, ?)", (code, telegram_id, expires_at))
-        conn.commit()
-        conn.close()
-        
-        await message.answer(
-            f"🔐 Ваш одноразовый код для входа на сайт:\n\n`{code}`\n\n"
-            "⚠️ *Код действителен в течение 1 минуты.* Введите его на сайте для авторизации.",
-            parse_mode="Markdown"
-        )
-
-    print("Telegram bot polling started...")
-    try:
-        await dp.start_polling(bot, skip_updates=True)
-    except Exception as e:
-        print(f"Bot polling error: {e}")
-
-# Запускаем телеграм-бота в фоновом потоке при старте FastAPI
+# --- АСИНХРОННЫЙ ЗАПУСК TELEGRAM-БОТА ЧЕРЕЗ ASYNCIO ---
 @app.on_event("startup")
-def on_startup():
-    threading.Thread(target=lambda: __import__('asyncio').run(start_telegram_bot()), daemon=True).start()
+async def on_startup():
+    async def run_bot():
+        if not TELEGRAM_BOT_TOKEN:
+            print("Telegram bot token not found, bot disabled.")
+            return
+        
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        dp = Dispatcher()
+
+        @dp.message(Command("start"))
+        async def cmd_start(message: aiogram_types.Message):
+            await message.answer(
+                "👋 Привет! Я бот-помощник **Rubinov AI**.\n\n"
+                "Чтобы войти в свой веб-кабинет, отправьте мне команду:\n👉 /login"
+            )
+
+        @dp.message(Command("login"))
+        async def cmd_login(message: aiogram_types.Message):
+            telegram_id = str(message.from_user.id)
+            username = message.from_user.username or message.from_user.first_name
+            
+            code = str(random.randint(100000, 999999))
+            expires_at = time.time() + 60  # 1 минута
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR REPLACE INTO users (telegram_id, username) VALUES (?, ?)", (telegram_id, username))
+            cursor.execute("INSERT OR REPLACE INTO login_codes (code, telegram_id, expires_at) VALUES (?, ?, ?)", (code, telegram_id, expires_at))
+            conn.commit()
+            conn.close()
+            
+            await message.answer(
+                f"🔐 Ваш одноразовый код для входа на сайт:\n\n`{code}`\n\n"
+                "⚠️ *Код действителен в течение 1 минуты.* Введите его на сайте для авторизации.",
+                parse_mode="Markdown"
+            )
+
+        print("Telegram bot polling started...")
+        try:
+            await dp.start_polling(bot, skip_updates=True)
+        except Exception as e:
+            print(f"Bot polling error: {e}")
+
+    asyncio.create_task(run_bot())
 
 
 if __name__ == "__main__":
