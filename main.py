@@ -52,7 +52,7 @@ def init_db():
 init_db()
 
 # --- TELEGRAM БОТ ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -68,23 +68,16 @@ app.add_middleware(
 )
 
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
-current_key_idx = 0
 current_model_idx = 0
 
-def get_api_keys():
-    keys = [
-        os.getenv("GEMINI_KEY_1"),
-        os.getenv("GEMINI_KEY_2"),
-        os.getenv("GEMINI_KEY_3"),
-        os.getenv("GEMINI_API_KEY")
-    ]
-    return [k.strip() for k in keys if k and k.strip()]
-
-def get_gemini_client(api_key: str):
-    return genai.Client(api_key=api_key)
+def get_gemini_client():
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_KEY_1")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY не найден в переменных окружения.")
+    return genai.Client(api_key=api_key.strip())
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
-    global current_key_idx, current_model_idx
+    global current_model_idx
     
     lowered = prompt.lower()
     if "нарисуй" in lowered or "draw" in lowered or "сгенерируй" in lowered:
@@ -103,26 +96,17 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
     <a href="{img_url}" target="_blank" download="rubinov_ai.jpg" style="display:inline-flex; align-items: center; gap: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:600; box-shadow: 0 4px 20px rgba(99, 102, 241, 0.35);">📥 Скачать в высоком разрешении</a>
 </div>"""
 
-    api_keys = get_api_keys()
-    if not api_keys:
-        raise HTTPException(status_code=500, detail="API-ключи не найдены в переменных окружения.")
-
-    num_keys = len(api_keys)
-    num_models = len(MODELS)
-    total_attempts = num_keys * num_models * 2
-
     contents = []
     if file_bytes and mime_type:
         contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
     if prompt:
         contents.append(prompt)
 
-    for attempt in range(total_attempts):
-        active_key = api_keys[current_key_idx % num_keys]
+    num_models = len(MODELS)
+    for attempt in range(num_models * 2):
         active_model = MODELS[current_model_idx % num_models]
-
         try:
-            client = get_gemini_client(active_key)
+            client = get_gemini_client()
             response = client.models.generate_content(model=active_model, contents=contents)
             return response.text
         except APIError as e:
@@ -131,13 +115,13 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
                 time.sleep(0.3)
                 continue
             else:
-                break
-        except Exception:
-            break
+                raise HTTPException(status_code=500, detail=f"Ошибка Gemini API: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка генерации: {str(e)}")
 
     raise HTTPException(status_code=500, detail="Сервис ИИ перегружен. Повторите попытку.")
 
-# --- TELEGRAM БОТ (ЛОГИКА И КНОПКИ) ---
+# --- TELEGRAM БОТ (ХЕНДЛЕРЫ) ---
 @dp.message(Command("start"))
 async def cmd_start(message: aiogram_types.Message):
     user_id = message.from_user.id
@@ -169,7 +153,7 @@ async def cmd_start(message: aiogram_types.Message):
         keyboard.inline_keyboard.append([InlineKeyboardButton(text="🛠 Админ-панель", callback_data="admin_panel")])
 
     await message.answer(
-        f"👋 Добро пожаловать в **Rubinov AI**!\nСтатус: {vip_status}\n\nВыберите действие в меню ниже:",
+        f"👋 Добро пожаловать в **Rubinov AI**!\nСтатус: {vip_status}\n\nНапишите мне любой вопрос прямо здесь или используйте кнопки ниже:",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -337,6 +321,32 @@ async def process_adm_action(callback: aiogram_types.CallbackQuery):
         f"✅ Статус пользователя `{target_id}` обновлен!\n• VIP: {'Да' if is_vip else 'Нет'}\n• Бан: {'Да' if is_banned else 'Нет'}",
         parse_mode="Markdown"
     )
+
+# Обработка обычных текстовых сообщений от пользователя в боте
+@dp.message(F.text)
+async def handle_telegram_text(message: aiogram_types.Message):
+    if message.text.startswith("/"):
+        return
+    
+    user_id = message.from_user.id
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_banned FROM users WHERE telegram_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and row[0]:
+        await message.answer("❌ Вы заблокированы.")
+        return
+
+    processing_msg = await message.answer("⏳ Думаю над ответом...")
+    try:
+        ai_response = get_gemini_response(message.text)
+        # Очищаем теги разметки под формат телеграма, если нужно, или шлем как текст
+        clean_text = ai_response.replace("<div style='margin-top:14px;'>", "").replace("</div>", "").replace("<img", "🖼 [Изображение]").replace("</a", "")
+        await bot.edit_message_text(clean_text[:4000], chat_id=message.chat.id, message_id=processing_msg.message_id)
+    except Exception as e:
+        await bot.edit_message_text(f"❌ Ошибка: {str(e)}", chat_id=message.chat.id, message_id=processing_msg.message_id)
 
 # --- API МАРШРУТЫ ---
 @app.post("/api/auth/verify")
