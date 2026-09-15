@@ -177,7 +177,7 @@ async def chat_endpoint(
     if not prompt.strip() and not file:
         raise HTTPException(status_code=400, detail="Запрос или файл обязателен")
     
-    file_bytes = awaitfile.read() if file else None
+    file_bytes = await file.read() if file else None
     mime_type = file.content_type if file else None
 
     answer = get_gemini_response(prompt, file_bytes, mime_type)
@@ -483,7 +483,7 @@ async def start_telegram_bot():
 
 # Запускаем телеграм-бота в фоновом потоке при старте FastAPI
 @app.on_event("startup")
-on_startup():
+def on_startup():
     threading.Thread(target=lambda: __import__('asyncio').run(start_telegram_bot()), daemon=True).start()
 
 
