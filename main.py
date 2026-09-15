@@ -160,8 +160,8 @@ async def cmd_start(message: aiogram_types.Message):
     vip_status = "👑 VIP Активен" if is_vip else "👤 Стандарт"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔑 Получить код для входа", callback_data="generate_code")],
-        [InlineKeyboardButton(text="💬 Тикеты (Поддержка)", callback_data="create_ticket")],
+        [InlineKeyboardButton(text="🔑 Получить код", callback_data="generate_code")],
+        [InlineKeyboardButton(text="💬 Тикеты", callback_data="create_ticket")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users"), InlineKeyboardButton(text="🔍 Найти по ID", callback_data="admin_search_prompt")]
     ])
 
@@ -188,12 +188,12 @@ async def process_generate_code(callback: aiogram_types.CallbackQuery):
     conn.close()
 
     try:
-        await callback.message.edit_text(
+        await callback.message.answer(
             f"🔐 Ваш код авторизации на сайте: `{code}`\n\n⏱ Действителен 5 минут.",
             parse_mode="Markdown"
         )
-    except Exception:
-        await callback.message.answer(f"🔐 Ваш код авторизации на сайте: `{code}`", parse_mode="Markdown")
+    except Exception as e:
+        print(f"Auth code error: {e}")
         
     await callback.answer("Код сгенерирован!")
 
