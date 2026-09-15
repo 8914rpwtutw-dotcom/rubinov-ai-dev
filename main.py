@@ -134,7 +134,7 @@ async def cmd_start(message: types.Message):
         reply_markup=get_main_keyboard(is_admin)
     )
 
-@dp.message(F.text == "🔑 Получить код")
+@dp.message(F.text.contains("Получить код"))
 async def btn_get_code(message: types.Message):
     tg_id = str(message.from_user.id)
     status = check_user_status(tg_id)
@@ -153,11 +153,11 @@ async def btn_get_code(message: types.Message):
         parse_mode="HTML"
     )
 
-@dp.message(F.text == "🎫 Тикеты")
+@dp.message(F.text.contains("Тикеты"))
 async def btn_tickets(message: types.Message):
     await message.answer("💬 Напишите ваше сообщение или вопрос прямо сюда, и поддержка ответит вам!")
 
-@dp.message(F.text == "👑 Админ-панель")
+@dp.message(F.text.contains("Админ-панель"))
 async def btn_admin_panel(message: types.Message):
     tg_id = str(message.from_user.id)
     if tg_id != str(ADMIN_ID):
@@ -256,7 +256,6 @@ def get_api_keys():
 
 @app.on_event("startup")
 async def startup_event():
-    # Автоматическая установка вебхука при старте (если указан Render/другой URL)
     render_url = os.getenv("RENDER_EXTERNAL_URL")
     if render_url and BOT_TOKEN:
         webhook_url = f"{render_url}/telegram-webhook"
