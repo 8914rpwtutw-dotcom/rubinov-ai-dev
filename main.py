@@ -12,7 +12,7 @@ from google.genai.errors import APIError
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import httpx
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -122,7 +122,7 @@ def get_all_tickets():
 def get_all_users_count_and_list():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT telegram_id, username, is_banned, is_vip FROM users ORDER BY telegram_id DESC LIMIT 15")
+    cursor.execute("SELECT telegram_id, username, is_banned, is_vip FROM users ORDER BY telegram_id DESC LIMIT 10")
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -156,7 +156,7 @@ async def cmd_start(message: types.Message):
     await message.answer(
         f"👋 Привет, <b>@{username}</b>!\n\n"
         f"🤖 Добро пожаловать в <b>Rubinov AI</b>.\n"
-        f"Используйте кнопки ниже для управления.",
+        f"Используйте кнопки меню ниже.",
         parse_mode="HTML",
         reply_markup=get_main_keyboard(is_admin)
     )
@@ -220,14 +220,51 @@ async def btn_users_list(message: types.Message):
     if not users:
         await message.answer("📭 Пользователей пока нет.")
         return
-    text = "👥 <b>Последние пользователи в базе:</b>\n\n"
+    
+    await message.answer("👥 <b>Управление пользователями:</b>", parse_mode="HTML")
     for u_id, u_name, u_ban, u_vip in users:
         status_tags = []
         if u_ban: status_tags.append("⛔ БАН")
         if u_vip: status_tags.append("⭐ VIP")
-        st_str = f" ({' | '.join(status_tags)})" if status_tags else ""
-        text += f"• <code>{u_id}</code> — @{u_name}{st_str}\n"
-    await message.answer(text, parse_mode="HTML")
+        st_str = f" [{' | '.join(status_tags)}]" if status_tags else ""
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⭐ VIP+" if not u_vip else "❌ Снять VIP", callback_data=f"toggle_vip_{u_id}"),
+                InlineKeyboardButton(text="⛔ Бан" if not u_ban else "✅ Разбан", callback_data=f"toggle_ban_{u_id}")
+            ]
+        ])
+        await message.answer(f"👤 <code>{u_id}</code> — @{u_name}{st_str}", parse_mode="HTML", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("toggle_vip_"))
+async def callback_toggle_vip(callback: types.CallbackQuery):
+    if str(callback.from_user.id) != str(ADMIN_ID): return
+    target_id = callback.data.split("_")[2]
+    status = check_user_status(target_id)
+    new_vip = 0 if status["is_vip"] else 1
+    set_user_vip(target_id, new_vip)
+    
+    action_text = "выдан ⭐ VIP" if new_vip else "снят VIP"
+    try: await bot.send_message(int(target_id), f"⭐ Вам {'выдан VIP статус!' if new_vip else 'снят VIP статус.'}")
+    except: pass
+    
+    await callback.answer(f"Статус VIP изменен!")
+    await callback.message.edit_text(f"👤 <code>{target_id}</code> — статус обновлен: {action_text}", parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("toggle_ban_"))
+async def callback_toggle_ban(callback: types.CallbackQuery):
+    if str(callback.from_user.id) != str(ADMIN_ID): return
+    target_id = callback.data.split("_")[2]
+    status = check_user_status(target_id)
+    new_ban = 0 if status["is_banned"] else 1
+    set_user_ban(target_id, new_ban)
+    
+    action_text = "забанен ⛔" if new_ban else "разбанен ✅"
+    try: await bot.send_message(int(target_id), f"❌ Вы забанены администратором." if new_ban else "✅ Вы разбанены!")
+    except: pass
+    
+    await callback.answer(f"Статус блокировки изменен!")
+    await callback.message.edit_text(f"👤 <code>{target_id}</code> — статус обновлен: {action_text}", parse_mode="HTML")
 
 @dp.message(F.text.contains("Найти по ID"))
 async def btn_search_user_prompt(message: types.Message):
@@ -244,10 +281,6 @@ async def btn_admin_panel(message: types.Message):
     if tg_id != str(ADMIN_ID): return
     await message.answer(
         "👑 <b>Панель администратора:</b>\n"
-        "• /ban [ID] — забанить\n"
-        "• /unban [ID] — разбанить\n"
-        "• /vip [ID] — выдать VIP\n"
-        "• /unvip [ID] — снять VIP\n"
         "• /user [ID] — инфо о пользователе\n"
         "• /reply [ID] [текст] — ответить на тикет",
         parse_mode="HTML"
@@ -262,52 +295,19 @@ async def cmd_user_info(message: types.Message):
         return
     target_id = args[1]
     status = check_user_status(target_id)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⭐ Сменить VIP", callback_data=f"toggle_vip_{target_id}"),
+            InlineKeyboardButton(text="⛔ Сменить Бан", callback_data=f"toggle_ban_{target_id}")
+        ]
+    ])
     await message.answer(
         f"👤 <b>Информация о пользователе <code>{target_id}</code>:</b>\n"
         f"• Забанен: {'Да' if status['is_banned'] else 'Нет'}\n"
         f"• VIP статус: {'Активен' if status['is_vip'] else 'Нет'}",
-        parse_mode="HTML"
+        parse_mode="HTML", reply_markup=kb
     )
-
-@dp.message(Command("ban"))
-async def cmd_ban(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    args = message.text.split()
-    if len(args) < 2: return
-    set_user_ban(args[1], 1)
-    try: await bot.send_message(int(args[1]), "❌ Вы забанены.")
-    except: pass
-    await message.answer(f"✅ Забанен {args[1]}")
-
-@dp.message(Command("unban"))
-async def cmd_unban(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    args = message.text.split()
-    if len(args) < 2: return
-    set_user_ban(args[1], 0)
-    try: await bot.send_message(int(args[1]), "✅ Вы разбанены.")
-    except: pass
-    await message.answer(f"✅ Разбанен {args[1]}")
-
-@dp.message(Command("vip"))
-async def cmd_vip(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    args = message.text.split()
-    if len(args) < 2: return
-    set_user_vip(args[1], 1)
-    try: await bot.send_message(int(args[1]), "⭐ Вам выдан VIP статус!")
-    except: pass
-    await message.answer(f"⭐ VIP выдан {args[1]}")
-
-@dp.message(Command("unvip"))
-async def cmd_unvip(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID): return
-    args = message.text.split()
-    if len(args) < 2: return
-    set_user_vip(args[1], 0)
-    try: await bot.send_message(int(args[1]), "ℹ️ VIP статус снят.")
-    except: pass
-    await message.answer(f"ℹ️ VIP снят с {args[1]}")
 
 @dp.message(Command("reply"))
 async def cmd_reply(message: types.Message):
@@ -400,7 +400,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
         clean_prompt = prompt.replace("Нарисуй:", "").replace("нарисуй", "").replace("сгенерируй", "").strip() or "futuristic neon landscape"
         import urllib.parse
         img_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(clean_prompt)}?width=1024&height=1024&nologo=true"
-        return f'Вот изображение: *"{clean_prompt}"*<div style="margin-top:14px;"><img src="{img_url}" style="max-width:100%; border-radius:16px; display:block; margin-bottom:12px;" /><a href="{img_url}" target="_blank" download="image.jpg" style="background:linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:600;">📥 Скачать</a></div>'
+        return f'Вот изображение: *"{clean_prompt}"*<div style="margin-top:14px;"><img src="{img_url}" style="max-width:100%; border-radius:16px; display:block; margin-bottom:12px;" /><a href="{img_url}" target="_blank" download="image.jpg" style="background:linear-gradient(135deg, #00f2fe, #4facfe); color:#000; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:700;">📥 Скачать</a></div>'
 
     api_keys = get_api_keys()
     if not api_keys: raise HTTPException(status_code=500, detail="Ключи не найдены.")
@@ -435,98 +435,108 @@ async def chat_endpoint(prompt: str = Form(""), file: Optional[UploadFile] = Fil
     mime_type = file.content_type if file else None
     return {"response": get_gemini_response(prompt, file_bytes, mime_type)}
 
-# ==================== УНИКАЛЬНЫЙ ДИЗАЙН ИНТЕРФЕЙСА ====================
+# ==================== СОВРЕМЕННЫЙ ДИЗАЙН ИНТЕРФЕЙСА ====================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rubinov AI</title>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>Rubinov AI — Neural Interface</title>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
         :root {
-            --bg-base: #0f1117;
-            --bg-sidebar: #161922;
-            --bg-chat: #13151c;
-            --border-color: rgba(255, 255, 255, 0.08);
-            --accent-purple: #8b5cf6;
-            --accent-blue: #3b82f6;
-            --text-main: #f3f4f6;
-            --text-muted: #9ca3af;
+            --bg-base: #07080b;
+            --bg-sidebar: #0d0f17;
+            --bg-chat: #090a0f;
+            --border-color: rgba(0, 242, 254, 0.12);
+            --neon-cyan: #00f2fe;
+            --neon-blue: #4facfe;
+            --text-main: #f1f5f9;
+            --text-muted: #64748b;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Space Grotesk', sans-serif; }
         body { background: var(--bg-base); color: var(--text-main); height: 100dvh; display: flex; overflow: hidden; }
 
         #auth-overlay {
-            position: fixed; inset: 0; background: rgba(10, 11, 15, 0.9); backdrop-filter: blur(12px);
+            position: fixed; inset: 0; background: rgba(7, 8, 11, 0.92); backdrop-filter: blur(16px);
             z-index: 9999; display: flex; align-items: center; justify-content: center;
         }
         .auth-box {
-            background: #1a1d28; border: 1px solid rgba(139, 92, 246, 0.3); padding: 32px; border-radius: 20px;
-            width: 360px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            background: #0d0f17; border: 1px solid var(--neon-cyan); padding: 36px; border-radius: 24px;
+            width: 380px; text-align: center; box-shadow: 0 0 40px rgba(0, 242, 254, 0.15);
         }
-        .auth-box h2 { margin-bottom: 12px; font-size: 20px; color: #fff; }
-        .auth-box p { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
+        .auth-box h2 { margin-bottom: 8px; font-size: 22px; color: #fff; letter-spacing: 0.5px; }
+        .auth-box p { font-size: 13px; color: var(--text-muted); margin-bottom: 24px; line-height: 1.4; }
         .auth-box a {
-            display: inline-block; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3);
-            padding: 10px 16px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 13px; margin-bottom: 20px;
+            display: inline-block; background: rgba(0, 242, 254, 0.08); color: var(--neon-cyan); border: 1px solid rgba(0, 242, 254, 0.2);
+            padding: 10px 18px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 13px; margin-bottom: 24px;
+            transition: 0.2s;
         }
+        .auth-box a:hover { background: rgba(0, 242, 254, 0.15); box-shadow: 0 0 15px rgba(0, 242, 254, 0.3); }
         .auth-box input {
-            width: 100%; background: #0f1117; border: 1px solid var(--border-color); color: #fff;
-            padding: 12px; border-radius: 12px; font-size: 20px; text-align: center; letter-spacing: 6px; outline: none; margin-bottom: 16px;
+            width: 100%; background: #050608; border: 1px solid var(--border-color); color: var(--neon-cyan);
+            padding: 14px; border-radius: 14px; font-size: 24px; text-align: center; letter-spacing: 8px; outline: none; margin-bottom: 16px;
         }
+        .auth-box input:focus { border-color: var(--neon-cyan); box-shadow: 0 0 10px rgba(0, 242, 254, 0.2); }
         .auth-box button {
-            width: 100%; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none;
-            color: #fff; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer;
+            width: 100%; background: linear-gradient(135deg, var(--neon-blue), var(--neon-cyan)); border: none;
+            color: #000; padding: 14px; border-radius: 14px; font-weight: 700; cursor: pointer; font-size: 14px;
+            transition: 0.2s;
         }
+        .auth-box button:hover { opacity: 0.9; box-shadow: 0 0 20px rgba(0, 242, 254, 0.4); }
 
         aside {
             width: 280px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color);
-            display: flex; flex-direction: column; padding: 16px; gap: 16px;
+            display: flex; flex-direction: column; padding: 20px; gap: 16px;
         }
         .brand-area { display: flex; align-items: center; justify-content: space-between; }
-        .brand-area h1 { font-size: 16px; font-weight: 700; color: #fff; }
-        .vip-tag { background: linear-gradient(135deg, #f59e0b, #d97706); color: #000; font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 6px; }
+        .brand-area h1 { font-size: 16px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #fff, var(--neon-cyan)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .vip-tag { background: linear-gradient(135deg, #f59e0b, #d97706); color: #000; font-size: 10px; font-weight: 800; padding: 4px 8px; border-radius: 6px; box-shadow: 0 0 10px rgba(245, 158, 11, 0.4); }
         
         .btn-new {
-            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; color: #fff;
-            padding: 10px; border-radius: 12px; font-weight: 600; font-size: 13px; cursor: pointer; text-align: center;
+            background: linear-gradient(135deg, var(--neon-blue), var(--neon-cyan)); border: none; color: #000;
+            padding: 12px; border-radius: 12px; font-weight: 700; font-size: 13px; cursor: pointer; text-align: center;
+            transition: 0.2s;
         }
+        .btn-new:hover { box-shadow: 0 0 15px rgba(0, 242, 254, 0.3); }
         .chats-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
         .chat-row {
-            background: rgba(255,255,255,0.02); border: 1px solid transparent; padding: 10px 12px; border-radius: 10px;
-            font-size: 13px; color: var(--text-muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            background: rgba(255,255,255,0.01); border: 1px solid transparent; padding: 10px 12px; border-radius: 10px;
+            font-size: 13px; color: var(--text-muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: 0.2s;
         }
-        .chat-row.active { background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3); color: #fff; }
+        .chat-row:hover { color: #fff; background: rgba(255,255,255,0.03); }
+        .chat-row.active { background: rgba(0, 242, 254, 0.08); border-color: rgba(0, 242, 254, 0.25); color: var(--neon-cyan); }
 
         main { flex: 1; display: flex; flex-direction: column; background: var(--bg-chat); position: relative; }
         header {
-            height: 60px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center;
-            justify-content: space-between; padding: 0 24px; background: rgba(19, 21, 28, 0.7); backdrop-filter: blur(8px);
+            height: 64px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center;
+            justify-content: space-between; padding: 0 28px; background: rgba(9, 10, 15, 0.8); backdrop-filter: blur(10px);
         }
         header h3 { font-size: 14px; font-weight: 600; color: #fff; }
 
         .chat-messages {
-            flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 850px; width: 100%; margin: 0 auto;
+            flex: 1; overflow-y: auto; padding: 28px; display: flex; flex-direction: column; gap: 20px; max-width: 900px; width: 100%; margin: 0 auto;
         }
-        .message { padding: 14px 18px; border-radius: 16px; font-size: 14px; line-height: 1.5; max-width: 85%; }
-        .message.user { background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); align-self: flex-end; border-bottom-right-radius: 4px; }
-        .message.bot { background: #1a1d28; border: 1px solid var(--border-color); align-self: flex-start; border-bottom-left-radius: 4px; }
+        .message { padding: 16px 20px; border-radius: 18px; font-size: 14px; line-height: 1.6; max-width: 85%; }
+        .message.user { background: rgba(0, 242, 254, 0.1); border: 1px solid rgba(0, 242, 254, 0.25); align-self: flex-end; border-bottom-right-radius: 4px; color: #fff; }
+        .message.bot { background: #0d0f17; border: 1px solid var(--border-color); align-self: flex-start; border-bottom-left-radius: 4px; }
 
-        .input-area { padding: 16px 24px; background: var(--bg-base); border-top: 1px solid var(--border-color); }
+        .input-area { padding: 20px 28px; background: var(--bg-base); border-top: 1px solid var(--border-color); }
         .input-box {
-            max-width: 850px; margin: 0 auto; background: #161922; border: 1px solid var(--border-color);
-            border-radius: 16px; display: flex; align-items: center; padding: 8px 12px; gap: 10px;
+            max-width: 900px; margin: 0 auto; background: #0d0f17; border: 1px solid var(--border-color);
+            border-radius: 16px; display: flex; align-items: center; padding: 8px 14px; gap: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
         }
         .input-box input {
-            flex: 1; background: transparent; border: none; color: #fff; font-size: 14px; outline: none; padding: 6px;
+            flex: 1; background: transparent; border: none; color: #fff; font-size: 14px; outline: none; padding: 8px;
         }
         .input-box button {
-            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; color: #fff;
-            padding: 8px 16px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 13px;
+            background: linear-gradient(135deg, var(--neon-blue), var(--neon-cyan)); border: none; color: #000;
+            padding: 10px 20px; border-radius: 12px; font-weight: 700; cursor: pointer; font-size: 13px; transition: 0.2s;
         }
+        .input-box button:hover { box-shadow: 0 0 15px rgba(0, 242, 254, 0.4); }
     </style>
 </head>
 <body>
@@ -534,10 +544,10 @@ HTML_TEMPLATE = """
     <div id="auth-overlay" style="display:none;">
         <div class="auth-box">
             <h2>Авторизация</h2>
-            <p>Перейдите в Telegram-бота, получите код и введите его ниже:</p>
+            <p>Запросите код в Telegram-боте и введите его ниже:</p>
             <a href="https://t.me/Rubinov_Ai_bot" target="_blank">🤖 Открыть @Rubinov_Ai_bot</a>
             <input type="text" id="code-input" placeholder="000000" maxlength="6">
-            <button onclick="auth()">Войти в систему</button>
+            <button onclick="auth()">Подключиться</button>
         </div>
     </div>
 
@@ -546,14 +556,14 @@ HTML_TEMPLATE = """
             <h1>Rubinov AI</h1>
             <div id="vip-slot"></div>
         </div>
-        <button class="btn-new" onclick="newChat()">+ Новая беседа</button>
+        <button class="btn-new" onclick="newChat()">+ Новый чат</button>
         <div class="chats-list" id="chats-list"></div>
-        <button onclick="logout()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:12px; text-align:left;">Выйти из аккаунта</button>
+        <button onclick="logout()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:12px; text-align:left; padding:4px;">Выйти из аккаунта</button>
     </aside>
 
     <main>
         <header>
-            <h3 id="header-title">Диалог</h3>
+            <h3 id="header-title">Нейросеть</h3>
             <div id="header-status" style="font-size:12px; color:var(--text-muted);"></div>
         </header>
 
@@ -561,7 +571,7 @@ HTML_TEMPLATE = """
 
         <div class="input-area">
             <div class="input-box">
-                <input type="text" id="user-input" placeholder="Введите сообщение..." onkeydown="if(event.key==='Enter') send()">
+                <input type="text" id="user-input" placeholder="Введите ваш запрос..." onkeydown="if(event.key==='Enter') send()">
                 <button onclick="send()">Отправить</button>
             </div>
         </div>
@@ -596,7 +606,7 @@ HTML_TEMPLATE = """
             if (data.is_banned) { alert('Вы забанены'); return; }
             if (data.is_vip) {
                 document.getElementById('vip-slot').innerHTML = '<span class="vip-tag">VIP</span>';
-                document.getElementById('header-status').textContent = 'VIP Режим активен';
+                document.getElementById('header-status').textContent = 'Neural VIP Active';
             }
             init();
         }
