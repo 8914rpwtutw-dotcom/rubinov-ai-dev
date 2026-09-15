@@ -12,7 +12,7 @@ from google.genai.errors import APIError
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import httpx
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -132,7 +132,7 @@ def get_main_keyboard(is_admin: bool = False):
         [KeyboardButton(text="🔑 Получить код"), KeyboardButton(text="🎫 Тикеты")],
     ]
     if is_admin:
-        keyboard.append([KeyboardButton(text="👑 Админ-панель"), KeyboardButton(text="📋 Просмотр тикетов")])
+        keyboard.append([KeyboardButton(text="👑 Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 @dp.message(Command("start"))
@@ -165,13 +165,13 @@ async def btn_get_code(message: types.Message):
         return
 
     code = str(random.randint(100000, 999900))
-    expires_at = time.time() + 900  # 15 минут
+    expires_at = time.time() + 900
     save_auth_code(tg_id, code, expires_at)
     
     await message.answer(
         f"🔑 Ваш код для входа на сайт:\n\n"
         f"<code>{code}</code>\n\n"
-        f"⏰ Действителен 15 минут. Введите его на сайте.",
+        f"⏰ Действителен 15 минут.",
         parse_mode="HTML"
     )
 
@@ -181,48 +181,38 @@ async def btn_tickets(message: types.Message):
     username = message.from_user.username or "user"
     register_user_if_not_exists(tg_id, username)
     
-    # Включаем режим ожидания текста тикета
+    # Если нажал админ — показываем список тикетов
+    if tg_id == str(ADMIN_ID):
+        tickets = get_all_tickets()
+        if not tickets:
+            await message.answer("📭 Активных тикетов нет.")
+            return
+        
+        text = "📋 <b>Последние тикеты:</b>\n\n"
+        for t_id, t_tg_id, t_username, t_msg, t_time in tickets:
+            time_str = time.strftime('%d.%m %H:%M', time.localtime(t_time))
+            text += f"🆔 <b>Тикет #{t_id}</b> от @{t_username} (<code>{t_tg_id}</code>) от {time_str}:\n" \
+                    f"💬 {t_msg}\n" \
+                    f"Ответить: <code>/reply {t_tg_id} текст</code>\n" \
+                    f"-----------------------------------\n"
+        await message.answer(text, parse_mode="HTML")
+        return
+
+    # Если обычный пользователь — активируем режим ожидания тикета
     set_waiting_for_ticket(tg_id, 1)
     await message.answer(
         "💬 <b>Создание тикета в поддержку:</b>\n\n"
-        "Опишите ваш вопрос или проблему прямо следующим сообщением, и оно будет отправлено администратору.",
+        "Напишите ваш вопрос или проблему следующим сообщением.",
         parse_mode="HTML"
     )
-
-@dp.message(F.text.contains("📋 Просмотр тикетов"))
-async def btn_view_tickets(message: types.Message):
-    tg_id = str(message.from_user.id)
-    if tg_id != str(ADMIN_ID):
-        return
-    
-    tickets = get_all_tickets()
-    if not tickets:
-        await message.answer("📭 Активных тикетов нет.")
-        return
-    
-    text = "📋 <b>Последние тикеты:</b>\n\n"
-    for t_id, t_tg_id, t_username, t_msg, t_time in tickets:
-        time_str = time.strftime('%d.%m %H:%M', time.localtime(t_time))
-        text += f"🆔 <b>Тикет #{t_id}</b> от @{t_username} (<code>{t_tg_id}</code>) от {time_str}:\n" \
-                f"💬 {t_msg}\n" \
-                f"Ответить: <code>/reply {t_tg_id} текст</code>\n" \
-                f"-----------------------------------\n"
-    
-    await message.answer(text, parse_mode="HTML")
 
 @dp.message(F.text.contains("Админ-панель"))
 async def btn_admin_panel(message: types.Message):
     tg_id = str(message.from_user.id)
-    if tg_id != str(ADMIN_ID):
-        return
+    if tg_id != str(ADMIN_ID): return
     await message.answer(
-        "👑 <b>Панель администратора:</b>\n\n"
-        "Команды:\n"
-        "• /ban [ID]\n"
-        "• /unban [ID]\n"
-        "• /vip [ID]\n"
-        "• /unvip [ID]\n"
-        "• /reply [ID] [текст]",
+        "👑 <b>Панель администратора:</b>\n"
+        "• /ban [ID]\n• /unban [ID]\n• /vip [ID]\n• /unvip [ID]\n• /reply [ID] [текст]",
         parse_mode="HTML"
     )
 
@@ -284,25 +274,17 @@ async def handle_other_messages(message: types.Message):
         await message.answer("⛔ Вы забанены.")
         return
     
-    # Проверяем, ждем ли мы от пользователя текст тикета
     if status["waiting_for_ticket"] == 1:
         save_ticket(tg_id, username, message.text, time.time())
-        set_waiting_for_ticket(tg_id, 0) # Сбрасываем режим
-        
-        await message.answer("✅ Ваш тикет успешно отправлен в поддержку! Ожидайте ответа.")
-        
+        set_waiting_for_ticket(tg_id, 0)
+        await message.answer("✅ Тикет успешно отправлен!")
         if ADMIN_ID:
             try:
-                await bot.send_message(
-                    int(ADMIN_ID), 
-                    f"📩 <b>Новый тикет от @{username} ({tg_id}):</b>\n{message.text}\n\nОтветить: <code>/reply {tg_id} текст</code>", 
-                    parse_mode="HTML"
-                )
+                await bot.send_message(int(ADMIN_ID), f"📩 <b>Новый тикет от @{username} ({tg_id}):</b>\n{message.text}\n\nОтветить: <code>/reply {tg_id} текст</code>", parse_mode="HTML")
             except: pass
         return
 
-    # Обычные сообщения (если не нажата кнопка тикета) просто игнорируются или выводят подсказку
-    await message.answer("ℹ️ Используйте кнопки меню. Чтобы обратиться в поддержку, нажмите кнопку <b>🎫 Тикеты</b>.", parse_mode="HTML")
+    await message.answer("ℹ️ Используйте кнопки меню. Чтобы обратиться в поддержку, нажмите <b>🎫 Тикеты</b>.", parse_mode="HTML")
 
 
 # ==================== FASTAPI СЕРВЕР ====================
@@ -335,8 +317,7 @@ async def startup_event():
 
 @app.post("/telegram-webhook")
 async def telegram_webhook(update: dict):
-    if not bot:
-        return {"status": "error"}
+    if not bot: return {"status": "error"}
     await dp.feed_update(bot, types.Update(**update))
     return {"status": "ok"}
 
@@ -351,7 +332,7 @@ def verify_code(code: str = Form(...)):
     if telegram_id:
         save_auth_code(telegram_id, "", 0)
         return {"status": "success", "telegram_id": telegram_id, "user": check_user_status(telegram_id)}
-    raise HTTPException(status_code=400, detail="Неверный код или истекло время (15 минут).")
+    raise HTTPException(status_code=400, detail="Неверный код или истекло время.")
 
 def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_type: Optional[str] = None) -> str:
     global current_key_idx, current_model_idx
@@ -363,7 +344,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
         return f'Вот изображение: *"{clean_prompt}"*<div style="margin-top:14px;"><img src="{img_url}" style="max-width:100%; border-radius:16px; display:block; margin-bottom:12px;" /><a href="{img_url}" target="_blank" download="image.jpg" style="background:linear-gradient(135deg, #6366f1, #a855f7); color:#fff; padding:9px 18px; border-radius:12px; font-size:12px; text-decoration:none; font-weight:600;">📥 Скачать</a></div>'
 
     api_keys = get_api_keys()
-    if not api_keys: raise HTTPException(status_code=500, detail="API-ключи не найдены.")
+    if not api_keys: raise HTTPException(status_code=500, detail="Ключи не найдены.")
     
     contents = []
     if file_bytes and mime_type: contents.append(types.Part.from_bytes(data=file_bytes, mime_type=mime_type))
@@ -395,6 +376,7 @@ async def chat_endpoint(prompt: str = Form(""), file: Optional[UploadFile] = Fil
     mime_type = file.content_type if file else None
     return {"response": get_gemini_response(prompt, file_bytes, mime_type)}
 
+# ==================== СТАРЫЙ УНИКАЛЬНЫЙ ДИЗАЙН ИНТЕРФЕЙСА ====================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -405,160 +387,223 @@ HTML_TEMPLATE = """
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        :root { --bg-main: #040508; --bg-sidebar: rgba(10, 12, 18, 0.85); --border-color: rgba(255, 255, 255, 0.06); --accent-gradient: linear-gradient(135deg, #6366f1 0%, #a855f7 100%); --vip-gradient: linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%); --text-main: #f1f5f9; --text-muted: #94a3b8; }
+        :root {
+            --bg-base: #0f1117;
+            --bg-sidebar: #161922;
+            --bg-chat: #13151c;
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-purple: #8b5cf6;
+            --accent-blue: #3b82f6;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Plus Jakarta Sans', sans-serif; }
-        html, body { height: 100%; height: 100dvh; overflow: hidden; background: var(--bg-main); color: var(--text-main); display: flex; }
-        #auth-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh; background: rgba(4, 5, 8, 0.9); backdrop-filter: blur(20px); z-index: 10000; display: flex; align-items: center; justify-content: center; padding: 20px; }
-        .auth-modal { background: rgba(15, 18, 26, 0.95); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 24px; padding: 32px; width: 100%; max-width: 400px; text-align: center; display: flex; flex-direction: column; gap: 16px; }
-        .auth-modal input { background: rgba(0, 0, 0, 0.5); border: 1px solid var(--border-color); border-radius: 12px; color: #fff; padding: 12px; font-size: 18px; text-align: center; letter-spacing: 4px; font-weight: 700; outline: none; }
-        .auth-modal button { background: var(--accent-gradient); color: #fff; border: none; border-radius: 12px; padding: 12px; font-weight: 600; cursor: pointer; }
-        .btn-bot-link { background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8; text-decoration: none; border-radius: 12px; padding: 10px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
-        .vip-badge { background: var(--vip-gradient); color: #000; font-size: 10px; font-weight: 800; padding: 4px 8px; border-radius: 6px; text-transform: uppercase; }
-        #sidebar { width: 290px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 18px 14px; height: 100dvh; z-index: 50; }
-        .brand { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-        .brand h2 { font-size: 14px; font-weight: 700; color: #fff; }
-        .btn-new-chat { background: var(--accent-gradient); color: #fff; border: none; padding: 10px; border-radius: 12px; font-size: 12px; font-weight: 600; cursor: pointer; margin-bottom: 14px; }
-        #chats-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
-        .chat-item { background: rgba(255,255,255,0.015); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px; font-size: 12px; color: #cbd5e1; display: flex; justify-content: space-between; cursor: pointer; }
-        .chat-item.active { background: rgba(168, 85, 247, 0.1); border-color: rgba(168, 85, 247, 0.35); color: #fff; }
-        #main { flex: 1; display: flex; flex-direction: column; position: relative; height: 100dvh; }
-        #chat-header { height: 60px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; background: rgba(4,5,8,0.5); }
-        #chat-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 900px; width: 100%; margin: 0 auto; }
-        .msg-user { background: rgba(99, 102, 241, 0.16); border: 1px solid rgba(168, 85, 247, 0.22); border-radius: 18px 18px 4px 18px; padding: 12px 16px; max-width: 85%; align-self: flex-end; font-size: 13.5px; }
-        .msg-bot { background: rgba(15, 18, 26, 0.65); border: 1px solid var(--border-color); border-radius: 18px 18px 18px 4px; padding: 16px; max-width: 90%; align-self: flex-start; font-size: 13.5px; }
-        #input-wrapper { padding: 16px 24px; background: var(--bg-main); }
-        #input-container { max-width: 900px; margin: 0 auto; background: rgba(13, 16, 24, 0.8); border: 1px solid rgba(168, 85, 247, 0.18); border-radius: 20px; padding: 8px 12px; display: flex; gap: 8px; align-items: center; }
-        #prompt-input { flex: 1; background: transparent; border: none; color: #fff; font-size: 14px; outline: none; padding: 6px; }
-        .btn-action { background: var(--accent-gradient); color: #fff; border: none; border-radius: 12px; padding: 10px 18px; font-weight: 600; cursor: pointer; }
+        body { background: var(--bg-base); color: var(--text-main); height: 100dvh; display: flex; overflow: hidden; }
+
+        /* Оверлей авторизации */
+        #auth-overlay {
+            position: fixed; inset: 0; background: rgba(10, 11, 15, 0.9); backdrop-filter: blur(12px);
+            z-index: 9999; display: flex; align-items: center; justify-content: center;
+        }
+        .auth-box {
+            background: #1a1d28; border: 1px solid rgba(139, 92, 246, 0.3); padding: 32px; border-radius: 20px;
+            width: 360px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .auth-box h2 { margin-bottom: 12px; font-size: 20px; color: #fff; }
+        .auth-box p { font-size: 13px; color: var(--text-muted); margin-bottom: 20px; }
+        .auth-box a {
+            display: inline-block; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3);
+            padding: 10px 16px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 13px; margin-bottom: 20px;
+        }
+        .auth-box input {
+            width: 100%; background: #0f1117; border: 1px solid var(--border-color); color: #fff;
+            padding: 12px; border-radius: 12px; font-size: 20px; text-align: center; letter-spacing: 6px; outline: none; margin-bottom: 16px;
+        }
+        .auth-box button {
+            width: 100%; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none;
+            color: #fff; padding: 12px; border-radius: 12px; font-weight: 600; cursor: pointer;
+        }
+
+        /* Сайдбар */
+        aside {
+            width: 280px; background: var(--bg-sidebar); border-right: 1px solid var(--border-color);
+            display: flex; flex-direction: column; padding: 16px; gap: 16px;
+        }
+        .brand-area { display: flex; align-items: center; justify-content: space-between; }
+        .brand-area h1 { font-size: 16px; font-weight: 700; color: #fff; }
+        .vip-tag { background: linear-gradient(135deg, #f59e0b, #d97706); color: #000; font-size: 10px; font-weight: 800; padding: 3px 8px; border-radius: 6px; }
+        
+        .btn-new {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; color: #fff;
+            padding: 10px; border-radius: 12px; font-weight: 600; font-size: 13px; cursor: pointer; text-align: center;
+        }
+        .chats-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+        .chat-row {
+            background: rgba(255,255,255,0.02); border: 1px solid transparent; padding: 10px 12px; border-radius: 10px;
+            font-size: 13px; color: var(--text-muted); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .chat-row.active { background: rgba(139, 92, 246, 0.1); border-color: rgba(139, 92, 246, 0.3); color: #fff; }
+
+        /* Основной блок чата */
+        main { flex: 1; display: flex; flex-direction: column; background: var(--bg-chat); position: relative; }
+        header {
+            height: 60px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center;
+            justify-content: space-between; padding: 0 24px; background: rgba(19, 21, 28, 0.7); backdrop-filter: blur(8px);
+        }
+        header h3 { font-size: 14px; font-weight: 600; color: #fff; }
+
+        .chat-messages {
+            flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; max-width: 850px; width: 100%; margin: 0 auto;
+        }
+        .message { padding: 14px 18px; border-radius: 16px; font-size: 14px; line-height: 1.5; max-width: 85%; }
+        .message.user { background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); align-self: flex-end; border-bottom-right-radius: 4px; }
+        .message.bot { background: #1a1d28; border: 1px solid var(--border-color); align-self: flex-start; border-bottom-left-radius: 4px; }
+
+        .input-area { padding: 16px 24px; background: var(--bg-base); border-top: 1px solid var(--border-color); }
+        .input-box {
+            max-width: 850px; margin: 0 auto; background: #161922; border: 1px solid var(--border-color);
+            border-radius: 16px; display: flex; align-items: center; padding: 8px 12px; gap: 10px;
+        }
+        .input-box input {
+            flex: 1; background: transparent; border: none; color: #fff; font-size: 14px; outline: none; padding: 6px;
+        }
+        .input-box button {
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; color: #fff;
+            padding: 8px 16px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 13px;
+        }
     </style>
 </head>
 <body>
+
     <div id="auth-overlay" style="display:none;">
-        <div class="auth-modal">
+        <div class="auth-box">
             <h2>Авторизация</h2>
-            <p style="font-size:13px; color:var(--text-muted);">Откройте бота, получите код и введите его:</p>
-            <a href="https://t.me/Rubinov_Ai_bot" target="_blank" class="btn-bot-link">Открыть Telegram-бота</a>
-            <input type="text" id="otp-input" placeholder="000000" maxlength="6" />
-            <button onclick="verifyOtpCode()">Войти</button>
+            <p>Перейдите в Telegram-бота, получите код и введите его ниже:</p>
+            <a href="https://t.me/Rubinov_Ai_bot" target="_blank">🤖 Открыть @Rubinov_Ai_bot</a>
+            <input type="text" id="code-input" placeholder="000000" maxlength="6">
+            <button onclick="auth()">Войти в систему</button>
         </div>
     </div>
 
-    <div id="sidebar">
-        <div class="brand">
-            <h2>Rubinov AI</h2>
-            <div id="badge-container"></div>
+    <aside>
+        <div class="brand-area">
+            <h1>Rubinov AI</h1>
+            <div id="vip-slot"></div>
         </div>
-        <button class="btn-new-chat" onclick="createNewChat()">+ Новый диалог</button>
-        <div id="chats-list"></div>
-        <button onclick="logout()" style="margin-top:auto; background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:11px; text-align:left;">Выйти</button>
-    </div>
+        <button class="btn-new" onclick="newChat()">+ Новая беседа</button>
+        <div class="chats-list" id="chats-list"></div>
+        <button onclick="logout()" style="background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:12px; text-align:left;">Выйти аккаунта</button>
+    </aside>
 
-    <div id="main">
-        <div id="chat-header">
-            <h3 id="current-chat-title">Чат</h3>
-            <div id="header-vip"></div>
-        </div>
-        <div id="chat-container"></div>
-        <div id="input-wrapper">
-            <div id="input-container">
-                <input type="text" id="prompt-input" placeholder="Введите сообщение..." onkeydown="if(event.key==='Enter') sendMessage()" />
-                <button class="btn-action" onclick="sendMessage()">Отправить</button>
+    <main>
+        <header>
+            <h3 id="header-title">Диалог</h3>
+            <div id="header-status" style="font-size:12px; color:var(--text-muted);"></div>
+        </header>
+
+        <div class="chat-messages" id="chat-messages"></div>
+
+        <div class="input-area">
+            <div class="input-box">
+                <input type="text" id="user-input" placeholder="Введите сообщение..." onkeydown="if(event.key==='Enter') send()">
+                <button onclick="send()">Отправить</button>
             </div>
         </div>
-    </div>
+    </main>
 
     <script>
-        let tgId = localStorage.getItem('rubinov_tg_id') || 'demo_user';
-        let chats = JSON.parse(localStorage.getItem('rubinov_chats') || '[]');
-        let currentChatId = localStorage.getItem('rubinov_active') || null;
+        let tgId = localStorage.getItem('rub_tg') || 'demo';
+        let chats = JSON.parse(localStorage.getItem('rub_chats') || '[]');
+        let activeId = localStorage.getItem('rub_act') || null;
 
-        if (tgId === 'demo_user') document.getElementById('auth-overlay').style.display = 'flex';
+        if (tgId === 'demo') document.getElementById('auth-overlay').style.display = 'flex';
         else checkStatus();
 
-        async function verifyOtpCode() {
-            const code = document.getElementById('otp-input').value.trim();
-            const formData = new FormData(); formData.append('code', code);
-            const res = await fetch('/api/auth/verify-code', { method: 'POST', body: formData });
-            const data = await res.json();
+        async function auth() {
+            let code = document.getElementById('code-input').value.trim();
+            let fd = new FormData(); fd.append('code', code);
+            let res = await fetch('/api/auth/verify-code', { method: 'POST', body: fd });
+            let data = await res.json();
             if (res.ok) {
                 tgId = data.telegram_id;
-                localStorage.setItem('rubinov_tg_id', tgId);
+                localStorage.setItem('rub_tg', tgId);
                 document.getElementById('auth-overlay').style.display = 'none';
                 checkStatus();
-                initChats();
-            } else { alert(data.detail || 'Ошибка'); }
+                init();
+            } else { alert(data.detail || 'Неверный код'); }
         }
 
         async function checkStatus() {
-            const res = await fetch(`/api/user/status?telegram_id=${tgId}`);
+            let res = await fetch(`/api/user/status?telegram_id=${tgId}`);
             if (!res.ok) { document.getElementById('auth-overlay').style.display = 'flex'; return; }
-            const data = await res.json();
+            let data = await res.json();
             if (data.is_banned) { alert('Вы забанены'); return; }
             if (data.is_vip) {
-                document.getElementById('badge-container').innerHTML = '<span class="vip-badge">VIP</span>';
-                document.getElementById('header-vip').innerHTML = '<span class="vip-badge">VIP Активен</span>';
+                document.getElementById('vip-slot').innerHTML = '<span class="vip-tag">VIP</span>';
+                document.getElementById('header-status').textContent = 'VIP Режим активен';
             }
-            initChats();
+            init();
         }
 
-        function logout() { localStorage.removeItem('rubinov_tg_id'); location.reload(); }
+        function logout() { localStorage.removeItem('rub_tg'); location.reload(); }
 
-        function initChats() {
-            if (chats.length === 0) createNewChat();
-            renderChats();
+        function init() {
+            if (chats.length === 0) newChat();
+            render();
         }
 
-        function createNewChat() {
-            const newChat = { id: Date.now().toString(), name: 'Новый чат', messages: [] };
-            chats.push(newChat);
-            currentChatId = newChat.id;
+        function newChat() {
+            let chat = { id: Date.now().toString(), title: 'Новый диалог', msgs: [] };
+            chats.push(chat);
+            activeId = chat.id;
             saveAndRender();
         }
 
         function saveAndRender() {
-            localStorage.setItem('rubinov_chats', JSON.stringify(chats));
-            localStorage.setItem('rubinov_active', currentChatId);
-            renderChats();
+            localStorage.setItem('rub_chats', JSON.stringify(chats));
+            localStorage.setItem('rub_act', activeId);
+            render();
         }
 
-        function renderChats() {
-            const list = document.getElementById('chats-list');
+        function render() {
+            let list = document.getElementById('chats-list');
             list.innerHTML = '';
             chats.forEach(c => {
-                const div = document.createElement('div');
-                div.className = `chat-item ${c.id === currentChatId ? 'active' : ''}`;
-                div.textContent = c.name;
-                div.onclick = () => { currentChatId = c.id; saveAndRender(); };
+                let div = document.createElement('div');
+                div.className = `chat-row ${c.id === activeId ? 'active' : ''}`;
+                div.textContent = c.title;
+                div.onclick = () => { activeId = c.id; saveAndRender(); };
                 list.appendChild(div);
             });
-            const active = chats.find(c => c.id === currentChatId);
-            if (active) {
-                document.getElementById('current-chat-title').textContent = active.name;
-                const container = document.getElementById('chat-container');
-                container.innerHTML = active.messages.map(m => `<div class="${m.role === 'user' ? 'msg-user' : 'msg-bot'}">${marked.parse(m.text)}</div>`).join('');
-                container.scrollTop = container.scrollHeight;
+
+            let cur = chats.find(c => c.id === activeId);
+            if (cur) {
+                document.getElementById('header-title').textContent = cur.title;
+                let box = document.getElementById('chat-messages');
+                box.innerHTML = cur.msgs.map(m => `<div class="message ${m.role}">${marked.parse(m.text)}</div>`).join('');
+                box.scrollTop = box.scrollHeight;
             }
         }
 
-        async function sendMessage() {
-            const input = document.getElementById('prompt-input');
-            const text = input.value.trim();
+        async function send() {
+            let input = document.getElementById('user-input');
+            let text = input.value.trim();
             if (!text) return;
-            const active = chats.find(c => c.id === currentChatId);
-            if (!active) return;
+            let cur = chats.find(c => c.id === activeId);
+            if (!cur) return;
 
-            active.messages.push({ role: 'user', text });
-            if (active.messages.length === 1) active.name = text.slice(0, 15);
+            cur.msgs.push({ role: 'user', text });
+            if (cur.msgs.length === 1) cur.title = text.slice(0, 18);
             input.value = '';
             saveAndRender();
 
-            const formData = new FormData();
-            formData.append('prompt', text);
-            formData.append('telegram_id', tgId);
+            let fd = new FormData();
+            fd.append('prompt', text);
+            fd.append('telegram_id', tgId);
 
-            const res = await fetch('/api/chat', { method: 'POST', body: formData });
-            const data = await res.json();
-            active.messages.push({ role: 'bot', text: res.ok ? data.response : 'Ошибка сервера' });
+            let res = await fetch('/api/chat', { method: 'POST', body: fd });
+            let data = await res.json();
+            cur.msgs.push({ role: 'bot', text: res.ok ? data.response : 'Ошибка сервера' });
             saveAndRender();
         }
     </script>
