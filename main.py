@@ -14,7 +14,6 @@ try:
     import jwt
     from google import genai
     from google.genai import types
-    from google.genai.errors import APIError
     from aiogram import Bot, Dispatcher, F, types as aiogram_types
     from aiogram.filters import Command
     from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -41,7 +40,6 @@ DB_NAME = "rubinov_secure.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    # Пользователи
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             telegram_id TEXT PRIMARY KEY,
@@ -49,7 +47,6 @@ def init_db():
             tier TEXT DEFAULT 'free'
         )
     ''')
-    # Коды входа
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS login_codes (
             code TEXT PRIMARY KEY,
@@ -57,14 +54,12 @@ def init_db():
             expires_at REAL
         )
     ''')
-    # Активные сессии (лимит устройств)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_sessions (
             telegram_id TEXT,
             session_id TEXT PRIMARY KEY
         )
     ''')
-    # Таблица обращений в техподдержку (тикеты)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS support_tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,16 +264,14 @@ async def get_root():
     return HTML_TEMPLATE
 
 
-# --- TELEGRAM БОТ ---
-@app.on_event("startup")
-async def on_startup():
+# --- TELEGRAM БОТ (ЗАПУСК ЧЕРЕЗ ФОНОВУЮ ЗАДАЧУ) ---
+async def start_telegram_bot():
     if not TELEGRAM_BOT_TOKEN:
         return
         
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
 
-    # Словарь памяти для администратора: какому пользователю он сейчас пишет ответ
     admin_reply_targets = {}
 
     @dp.message(Command("start"))
@@ -336,7 +329,6 @@ async def on_startup():
             
         support_text = text_parts[1]
         
-        # Сохраняем тикет в базу данных
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute("INSERT INTO support_tickets (telegram_id, username, message, created_at) VALUES (?, ?, ?, ?)", 
@@ -346,7 +338,6 @@ async def on_startup():
         
         await m.answer("✅ Ваше обращение отправлено в поддержку! Администратор скоро ответит вам.")
 
-        # Уведомляем администратора
         if ADMIN_TELEGRAM_ID:
             user_label = f"@{uname}" if m.from_user.username else uname
             notif_text = f"🆘 **Новый запрос в поддержку!**\n\n👤 От: {user_label} (ID: `{t_id}`)\n💬 Текст: {support_text}"
@@ -359,7 +350,6 @@ async def on_startup():
             except Exception:
                 pass
 
-    # --- АДМИН: СПИСОК ТИКЕТОВ ПОДДЕРЖКИ ---
     @dp.message(Command("tickets"))
     async def cmd_tickets(m: aiogram_types.Message):
         if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
@@ -393,7 +383,6 @@ async def on_startup():
             )
             await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-    # --- АДМИН: СПИСОК ПОЛЬЗОВАТЕЛЕЙ И УПРАВЛЕНИЕ VIP ---
     @dp.message(Command("users"))
     async def cmd_admin_users(m: aiogram_types.Message):
         if str(m.from_user.id) != ADMIN_TELEGRAM_ID:
@@ -424,7 +413,6 @@ async def on_startup():
             card_text = f"👤 <b>{uname}</b>\nID: <code>{t_id}</code>\nСтатус: <b>{status_icon}</b>"
             await m.answer(card_text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
-    # --- КНОПКИ УПРАВЛЕНИЯ И ОТВЕТОВ ---
     @dp.callback_query(F.data.startswith("setvip_") | F.data.startswith("setfree_"))
     async def process_tier_change(callback: aiogram_types.CallbackQuery):
         if str(callback.from_user.id) != ADMIN_TELEGRAM_ID:
@@ -477,7 +465,6 @@ async def on_startup():
         await callback.message.answer(f"✍️ Напишите ответ для пользователя (ID: <code>{target_id}</code>) в следующем сообщении:", parse_mode="HTML")
         await callback.answer()
 
-    # Перехват текста от админа для отправки клиенту
     @dp.message()
     async def admin_chat_handler(m: aiogram_types.Message):
         t_id = str(m.from_user.id)
@@ -489,11 +476,16 @@ async def on_startup():
             except Exception as e:
                 await m.answer(f"❌ Ошибка отправки: {e}")
 
-    print("Bot started with tickets and admin controls...")
+    print("Bot started with background task safely...")
     try:
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
         print(f"Bot error: {e}")
+
+@app.on_event("startup")
+async def startup_event():
+    # Запускаем бота в фоновой задаче, чтобы FastAPI мгновенно открыл порт для Render
+    asyncio.create_task(start_telegram_bot())
 
 if __name__ == "__main__":
     import uvicorn
