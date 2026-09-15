@@ -4,17 +4,18 @@ import asyncio
 import sqlite3
 from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Cookie, Response
+from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Cookie, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
-# Aiogram для Telegram бота
+# Aiogram
 from aiogram import Bot, Dispatcher, F, types as aiogram_types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # --- БАЗА ДАННЫХ ---
 DB_FILE = "rubinov_ai.db"
@@ -54,21 +55,21 @@ init_db()
 # --- TELEGRAM БОТ ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 ADMIN_TELEGRAM_ID = int(os.getenv("ADMIN_TELEGRAM_ID", "0"))
+# Укажи здесь точный URL твоего сайта на Render (без слэша на конце)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://rubinov-ai-dev.onrender.com")
+WEBHOOK_PATH = "/telegram-webhook"
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# --- LIFESPAN ДЛЯ СОВМЕСТНОГО ЗАПУСКА FASTAPI И BOT ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запускаем поллинг бота в фоновой задаче FastAPI event loop
-    polling_task = asyncio.create_task(dp.start_polling(bot))
+    # Устанавливаем вебхук при старте сервера
+    webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+    await bot.set_webhook(webhook_url, drop_pending_updates=True)
     yield
-    polling_task.cancel()
-    try:
-        await polling_task
-    except asyncio.CancelledError:
-        pass
+    # Удаляем вебхук при выключении
+    await bot.delete_webhook()
     await bot.session.close()
 
 app = FastAPI(lifespan=lifespan)
@@ -79,6 +80,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+# Регистрируем обработчик вебхуков aiogram для FastAPI
+webhook_requests_handler = SimpleRequestHandler(
+    dispatcher=dp,
+    bot=bot,
+)
+webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+setup_application(app, dp, bot=bot)
+
 
 MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
 current_key_idx = 0
@@ -150,7 +160,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 
     raise HTTPException(status_code=500, detail="Сервис ИИ перегружен. Повторите попытку.")
 
-# --- TELEGRAM БОТ (ЛОГИКА И КНОПКИ) ---
+# --- TELEGRAM БОТ (ХЕНДЛЕРЫ) ---
 @dp.message(Command("start"))
 async def cmd_start(message: aiogram_types.Message):
     user_id = message.from_user.id
@@ -189,7 +199,6 @@ async def cmd_start(message: aiogram_types.Message):
 
 @dp.callback_query(F.data == "generate_code")
 async def process_generate_code(callback: aiogram_types.CallbackQuery):
-    # Сразу гасим анимацию загрузки на кнопке, чтобы она не висела
     await callback.answer("Генерируем код...")
     
     user_id = callback.from_user.id
