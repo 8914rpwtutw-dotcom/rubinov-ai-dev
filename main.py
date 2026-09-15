@@ -130,7 +130,6 @@ async def chat_endpoint(
     answer = get_gemini_response(prompt, file_bytes, mime_type)
     return {"response": answer}
 
-# Шаблон интерфейса вынесен в обычную строку для предотвращения ошибок с фигурными скобками
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -151,6 +150,9 @@ HTML_TEMPLATE = """
             --border-hover: rgba(255, 255, 255, 0.18);
             --accent: #6366f1;
             --accent-hover: #4f46e5;
+            --cancel-bg: rgba(248, 113, 113, 0.15);
+            --cancel-border: rgba(248, 113, 113, 0.4);
+            --cancel-color: #f87171;
             --text-main: #f8fafc;
             --text-muted: #94a3b8;
             --user-msg-bg: #1e2235;
@@ -362,7 +364,7 @@ HTML_TEMPLATE = """
         .loader-box {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
             background: var(--bot-msg-bg);
             border: 1px solid var(--border-color);
             border-radius: 12px 12px 12px 2px;
@@ -370,20 +372,14 @@ HTML_TEMPLATE = """
             font-size: 13px;
             color: var(--text-muted);
         }
-        .btn-cancel-request {
-            background: rgba(248, 113, 113, 0.1);
-            border: 1px solid rgba(248, 113, 113, 0.3);
-            color: #f87171;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 3px 8px;
-            border-radius: 6px;
-            cursor: pointer;
-            transition: 0.2s;
+        .spinner {
+            width: 14px; height: 14px;
+            border: 2px solid rgba(255,255,255,0.2);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
         }
-        .btn-cancel-request:hover {
-            background: rgba(248, 113, 113, 0.2);
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         #input-wrapper {
             position: absolute; bottom: 0; left: 0; right: 0; 
@@ -397,11 +393,7 @@ HTML_TEMPLATE = """
             border: 1px solid var(--border-color); border-radius: 14px; 
             padding: 6px 10px; display: flex; flex-direction: column; gap: 6px;
             box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
-            transition: border-color 0.2s, opacity 0.2s;
-        }
-        #input-container.disabled {
-            opacity: 0.5;
-            pointer-events: none;
+            transition: border-color 0.2s;
         }
 
         #file-info-bar { display: none; align-items: center; justify-content: space-between; background: rgba(255, 255, 255, 0.05); padding: 4px 10px; border-radius: 6px; font-size: 11px; color: var(--text-muted); }
@@ -415,10 +407,24 @@ HTML_TEMPLATE = """
 
         #prompt-input { flex: 1; background: transparent; border: none; color: #ffffff; font-size: 14px; outline: none; min-width: 0; }
         #prompt-input::placeholder { color: var(--text-muted); }
+        #prompt-input:disabled { opacity: 0.5; }
         
-        .btn-send { background: var(--accent); color: #ffffff; border: none; border-radius: 8px; padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s ease; flex-shrink: 0; }
-        .btn-send:hover { background: var(--accent-hover); }
-        .btn-send:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-action { 
+            background: var(--accent); color: #ffffff; border: none; border-radius: 8px; 
+            padding: 8px 14px; font-size: 12px; font-weight: 600; cursor: pointer; 
+            transition: all 0.2s ease; flex-shrink: 0; display: flex; align-items: center; justify-content: center; min-width: 85px;
+        }
+        .btn-action:hover { background: var(--accent-hover); }
+        
+        /* Состояние отмены для кнопки */
+        .btn-action.cancel-mode {
+            background: var(--cancel-bg);
+            border: 1px solid var(--cancel-border);
+            color: var(--cancel-color);
+        }
+        .btn-action.cancel-mode:hover {
+            background: rgba(248, 113, 113, 0.25);
+        }
 
         @media (max-width: 768px) {
             #sidebar { 
@@ -505,19 +511,18 @@ HTML_TEMPLATE = """
 
                     <input type="text" id="prompt-input" placeholder="Введите сообщение или опишите картинку..." onkeydown="handleKeyPress(event)" />
                     
-                    <button class="btn-send" id="send-btn" onclick="sendMessage()">Отправить</button>
+                    <button class="btn-action" id="action-btn" onclick="handleActionButton()">Отправить</button>
                 </div>
             </div>
         </div>
     </div>
 
     <script>
-        let chats = JSON.parse(localStorage.getItem('rubinov_chats_dev_v5') || '[]');
-        let currentChatId = localStorage.getItem('rubinov_active_chat_dev_v5') || null;
+        let chats = JSON.parse(localStorage.getItem('rubinov_chats_dev_v6') || '[]');
+        let currentChatId = localStorage.getItem('rubinov_active_chat_dev_v6') || null;
         let selectedFile = null;
         let activeController = null;
-
-        console.log('[DEV_UI] Initialized. Chats loaded:', chats.length);
+        let isGenerating = false;
 
         if (chats.length === 0) {
             const initialChat = { id: Date.now().toString(), name: 'Новый чат 1', messages: [] };
@@ -529,8 +534,8 @@ HTML_TEMPLATE = """
         }
 
         function saveState() {
-            localStorage.setItem('rubinov_chats_dev_v5', JSON.stringify(chats));
-            localStorage.setItem('rubinov_active_chat_dev_v5', currentChatId);
+            localStorage.setItem('rubinov_chats_dev_v6', JSON.stringify(chats));
+            localStorage.setItem('rubinov_active_chat_dev_v6', currentChatId);
             renderChats();
         }
 
@@ -575,6 +580,7 @@ HTML_TEMPLATE = """
                 activeController.abort();
             }
             currentChatId = id;
+            setGeneratingState(false);
             saveState();
             if (window.innerWidth <= 768) {
                 toggleSidebar();
@@ -596,6 +602,7 @@ HTML_TEMPLATE = """
             };
             chats.push(newChat);
             currentChatId = newChat.id;
+            setGeneratingState(false);
             saveState();
             if (window.innerWidth <= 768) toggleSidebar();
         }
@@ -629,7 +636,7 @@ HTML_TEMPLATE = """
                         <path d="M42 45 Q46 40 50 45 Q54 40 58 45 Q60 52 50 56 Q40 52 42 45 Z" stroke="#ffffff" stroke-width="2.5" fill="none" />
                     </svg>
                     <h1>Rubinov AI [Dev]</h1>
-                    <p>Интерфейс готов к тестированию. Напишите сообщение.</p>
+                    <p>Кнопка отправки совмещена с отменой. Напишите сообщение.</p>
                 `;
                 chatContainer.appendChild(welcome);
                 return;
@@ -706,28 +713,35 @@ HTML_TEMPLATE = """
         }
 
         function handleKeyPress(e) {
-            if (e.key === 'Enter') sendMessage();
+            if (e.key === 'Enter') handleActionButton();
         }
 
-        function setInputBlocked(blocked) {
-            const inputContainer = document.getElementById('input-container');
+        function setGeneratingState(generating) {
+            isGenerating = generating;
+            const actionBtn = document.getElementById('action-btn');
             const promptInput = document.getElementById('prompt-input');
-            const sendBtn = document.getElementById('send-btn');
-            
-            if (blocked) {
-                inputContainer.classList.add('disabled');
+
+            if (generating) {
+                actionBtn.textContent = 'Отменить';
+                actionBtn.className = 'btn-action cancel-mode';
                 promptInput.disabled = true;
-                sendBtn.disabled = true;
             } else {
-                inputContainer.classList.remove('disabled');
+                actionBtn.textContent = 'Отправить';
+                actionBtn.className = 'btn-action';
                 promptInput.disabled = false;
-                sendBtn.disabled = false;
                 promptInput.focus();
             }
         }
 
+        function handleActionButton() {
+            if (isGenerating) {
+                cancelCurrentRequest();
+            } else {
+                sendMessage();
+            }
+        }
+
         function cancelCurrentRequest() {
-            console.log('[DEV_UI] User cancelled request.');
             if (activeController) {
                 activeController.abort();
                 activeController = null;
@@ -742,7 +756,7 @@ HTML_TEMPLATE = """
             }
 
             document.getElementById('temp-loader-row')?.remove();
-            setInputBlocked(false);
+            setGeneratingState(false);
             saveState();
         }
 
@@ -776,7 +790,7 @@ HTML_TEMPLATE = """
 
             input.value = '';
             removeSelectedFile();
-            setInputBlocked(true);
+            setGeneratingState(true);
 
             const chatContainer = document.getElementById('chat-container');
             const botRow = document.createElement('div');
@@ -784,8 +798,8 @@ HTML_TEMPLATE = """
             botRow.id = 'temp-loader-row';
             botRow.innerHTML = `
                 <div class="loader-box">
+                    <div class="spinner"></div>
                     <span>Думаю...</span>
-                    <button class="btn-cancel-request" onclick="cancelCurrentRequest()">Отменить</button>
                 </div>
             `;
             chatContainer.appendChild(botRow);
@@ -794,7 +808,6 @@ HTML_TEMPLATE = """
             activeController = new AbortController();
 
             try {
-                console.log('[DEV_UI] Sending request to API...');
                 const res = await fetch('/api/chat', {
                     method: 'POST',
                     body: formData,
@@ -803,24 +816,20 @@ HTML_TEMPLATE = """
                 const data = await res.json();
 
                 document.getElementById('temp-loader-row')?.remove();
-                setInputBlocked(false);
+                setGeneratingState(false);
                 activeController = null;
 
                 if (res.ok) {
-                    console.log('[DEV_UI] Response received successfully.');
                     activeChat.messages.push({ role: 'bot', text: data.response });
                 } else {
-                    console.warn('[DEV_UI] API returned error:', data.detail);
                     activeChat.messages.push({ role: 'bot', text: 'Ошибка: ' + (data.detail || 'Не удалось получить ответ.') });
                 }
             } catch (e) {
                 if (e.name === 'AbortError') {
-                    console.log('[DEV_UI] Request aborted by user.');
                     return;
                 }
-                console.error('[DEV_UI] Network error:', e);
                 document.getElementById('temp-loader-row')?.remove();
-                setInputBlocked(false);
+                setGeneratingState(false);
                 activeController = null;
                 activeChat.messages.push({ role: 'bot', text: 'Ошибка подключения к серверу.' });
             }
