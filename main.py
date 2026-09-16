@@ -1,62 +1,207 @@
 import os
+import sqlite3
 import base64
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-from typing import Optional
+from functools import wraps
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
 
-app = FastAPI(title="Rubinov AI API")
+app = Flask(__name__)
+app.secret_key = "rubinov_ai_super_secret_key_change_me_in_production"
 
-# Настройки CORS для работы на продакшене
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ==========================================
+#  ИНИЦИАЛИЗАЦИЯ И НАСТРОЙКА БАЗЫ ДАННЫХ
+# ==========================================
+DATABASE = 'rubinov_ai.db'
 
-class ChatRequest(BaseModel):
-    prompt: Optional[str] = ""
-    image: Optional[str] = None
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# 1. Главная страница (отдает index.html)
-@app.get("/")
-async def read_index():
-    if os.path.exists("index.html"):
-        return FileResponse("index.html")
-    return {"error": "index.html not found on server"}
+def init_db():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Таблица пользователей
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # Таблица истории сообщений
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                image_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        ''')
+        conn.commit()
 
-# 2. Основной API эндпоинт чата
-@app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
-    prompt_text = request.prompt.strip() if request.prompt else ""
-    
-    # Режим генерации картинок
-    if prompt_text.lower().startswith("нарисуй:") or prompt_text.lower().startswith("draw:"):
-        clean_prompt = prompt_text.split(":", 1)[1].strip()
-        return {
-            "response": f"Изображение по запросу «{clean_prompt}» сгенерировано!",
-            "image_url": "https://picsum.photos/800/600"  # Замените на вызов вашего Imagen API
-        }
+# Инициализируем БД при запуске
+init_db()
 
-    # Анализ прикрепленного фото
-    if request.image:
-        return {
-            "response": f"Изображение получено. Текст: «{prompt_text or 'Без текста'}»"
-        }
+# ==========================================
+#  НАСТРОЙКА АВТОРИЗАЦИИ (Flask-Login)
+# ==========================================
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
 
-    # Обычный текстовый запрос
-    if prompt_text:
-        return {
-            "response": f"Ответ Rubinov AI: {prompt_text}"
-        }
+class User(UserMixin):
+    def __init__(self, id, username):
+        self.id = id
+        self.username = username
 
-    raise HTTPException(status_code=400, detail="Empty prompt")
+@login_manager.user_loader
+def load_user(user_id):
+    with get_db() as conn:
+        user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+        if user:
+            return User(id=user['id'], username=user['username'])
+    return None
 
-# Запуск Uvicorn с учетом порта Render
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+# ==========================================
+#  МАРШРУТЫ АВТОРИЗАЦИИ И СТРАНИЦ
+# ==========================================
+
+@app.route('/')
+@login_required
+def index():
+    # Отдаёт главный интерфейс только авторизованным пользователям
+    return render_template('index.html', username=current_user.username)
+
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+
+    if not username or not password:
+        return jsonify({'error': 'Заполните логин и пароль'}), 400
+
+    hashed_password = generate_password_hash(password)
+
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
+                           (username, hashed_password))
+            conn.commit()
+            user_id = cursor.lastrowid
+        
+        # Автоматический вход после регистрации
+        user = User(id=user_id, username=username)
+        login_user(user)
+        return jsonify({'success': True, 'message': 'Успешная регистрация'})
+    except sqlite3.IntegrityError:
+        return jsonify({'error': 'Пользователь с таким именем уже существует'}), 400
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+
+    with get_db() as conn:
+        user = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        if user and check_password_hash(user['password_hash'], password):
+            user_obj = User(id=user['id'], username=user['username'])
+            login_user(user_obj)
+            return jsonify({'success': True, 'message': 'Успешный вход'})
+
+    return jsonify({'error': 'Неверный логин или пароль'}), 401
+
+@app.route('/logout', methods=['POST', 'GET'])
+@login_required
+def logout():
+    logout_user()
+    return jsonify({'success': True, 'message': 'Вы вышли из системы'})
+
+@app.route('/api/user_status')
+def user_status():
+    if current_user.is_authenticated:
+        return jsonify({'authenticated': True, 'username': current_user.username})
+    return jsonify({'authenticated': False})
+
+# ==========================================
+#  ОСНОВНОЙ API-ЭНДПОИНТ ЧАТА И ИИ
+# ==========================================
+
+@app.route('/api/chat', methods=['POST'])
+@login_required
+def chat_handler():
+    data = request.get_json() or {}
+    prompt = data.get('prompt', '').strip()
+    image_base64 = data.get('image', None)
+
+    if not prompt and not image_base64:
+        return jsonify({'error': 'Пустой запрос'}), 400
+
+    try:
+        # Сохраняем сообщение пользователя в БД
+        with get_db() as conn:
+            conn.execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)',
+                         (current_user.id, 'user', prompt))
+            conn.commit()
+
+        # 1. Сценарий: Генерация изображения
+        if prompt.lower().startswith('нарисуй') or prompt.lower().startswith('draw'):
+            clean_prompt = prompt.split(':', 1)[-1].strip() if ':' in prompt else prompt
+            
+            bot_response = f"Изображение по запросу «{clean_prompt}» сформировано."
+            image_url = "https://picsum.photos/800/600"  # Заглушка (подключите здесь Imagen / DALL-E)
+
+            # Сохраняем ответ бота в БД
+            with get_db() as conn:
+                conn.execute('INSERT INTO messages (user_id, role, content, image_url) VALUES (?, ?, ?, ?)',
+                             (current_user.id, 'bot', bot_response, image_url))
+                conn.commit()
+
+            return jsonify({
+                'response': bot_response,
+                'image_url': image_url
+            })
+
+        # 2. Сценарий: Текстовый диалог (и анализ прикрепленного фото)
+        else:
+            bot_response = f"Ответ Rubinov AI для {current_user.username}: {prompt}"
+            if image_base64:
+                bot_response += " (Изображение успешно проанализировано)"
+
+            # Сохраняем ответ бота в БД
+            with get_db() as conn:
+                conn.execute('INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)',
+                             (current_user.id, 'bot', bot_response))
+                conn.commit()
+
+            return jsonify({
+                'response': bot_response
+            })
+
+    except Exception as e:
+        return jsonify({'error': f'Ошибка обработки на сервере: {str(e)}'}), 500
+
+# Получение истории сообщений текущего пользователя
+@app.route('/api/history', methods=['GET'])
+@login_required
+def get_history():
+    with get_db() as conn:
+        messages = conn.execute(
+            'SELECT role, content, image_url, created_at FROM messages WHERE user_id = ? ORDER BY id ASC',
+            (current_user.id,)
+        ).fetchall()
+        
+        history = [dict(msg) for msg in messages]
+        return jsonify({'history': history})
+
+if __name__ == '__main__':
+    # Зависимости перед запуском: pip install flask flask-login werkzeug
+    app.run(host='0.0.0.0', port=5000, debug=True)
