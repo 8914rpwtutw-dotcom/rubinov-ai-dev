@@ -1,14 +1,14 @@
+import os
 import base64
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
 
 app = FastAPI(title="Rubinov AI API")
 
-# Разрешаем CORS на случай запуска фронтенда и бэкенда на разных портах
+# Настройки CORS для работы на продакшене
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,49 +17,46 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Модель входящих данных от интерфейса
 class ChatRequest(BaseModel):
     prompt: Optional[str] = ""
-    image: Optional[str] = None  # Base64 строка изображения, если прикреплено
+    image: Optional[str] = None
 
+# 1. Главная страница (отдает index.html)
+@app.get("/")
+async def read_index():
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
+    return {"error": "index.html not found on server"}
 
+# 2. Основной API эндпоинт чата
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     prompt_text = request.prompt.strip() if request.prompt else ""
     
-    # 1. Если пользователь попросил сгенерировать картинку (нажал кнопкy ✦ или написал "Нарисуй:")
+    # Режим генерации картинок
     if prompt_text.lower().startswith("нарисуй:") or prompt_text.lower().startswith("draw:"):
         clean_prompt = prompt_text.split(":", 1)[1].strip()
-        
-        # TODO: Вставьте здесь реальную генерацию через Imagen / DALL-E / Stable Diffusion
-        # Например, получение картинки и возврат URL или Base64
         return {
-            "response": f"Изображение по запросу «{clean_prompt}» успешно сгенерировано!",
-            "image_url": "https://picsum.photos/800/600" # Заглушка: подставьте ваш URL или Base64
+            "response": f"Изображение по запросу «{clean_prompt}» сгенерировано!",
+            "image_url": "https://picsum.photos/800/600"  # Замените на вызов вашего Imagen API
         }
 
-    # 2. Если к запросу прикреплено фото (Vision / Анализ изображений)
+    # Анализ прикрепленного фото
     if request.image:
-        # request.image содержит base64 ("data:image/png;base64,...")
         return {
-            "response": f"Я получил ваше изображение и текст: «{prompt_text or 'Без описания'}». Обработка изображений работает!"
+            "response": f"Изображение получено. Текст: «{prompt_text or 'Без текста'}»"
         }
 
-    # 3. Обычный текстовый запрос к нейросети
+    # Обычный текстовый запрос
     if prompt_text:
-        # TODO: Подключите здесь вашу нейросеть (Gemini API, OpenAI API и т.д.)
-        ai_reply = f"Ответ Rubinov AI на ваш запрос: {prompt_text}"
-        return {"response": ai_reply}
+        return {
+            "response": f"Ответ Rubinov AI: {prompt_text}"
+        }
 
-    raise HTTPException(status_code=400, detail="Пустой запрос")
+    raise HTTPException(status_code=400, detail="Empty prompt")
 
-
-# Раздаем index.html как главную страницу
-@app.get("/")
-async def read_index():
-    return FileResponse("index.html")
-
-
+# Запуск Uvicorn с учетом порта Render
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
