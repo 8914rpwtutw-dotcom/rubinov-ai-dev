@@ -5,6 +5,8 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -20,7 +22,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")
 
 app = FastAPI(title="Rubinov AI Server")
-
 DATABASE = "rubinov_ai.db"
 
 # ==========================================
@@ -111,12 +112,23 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: sqlite3.Connection
     return dict(user)
 
 # ==========================================
-#  МАРШРУТЫ (ENDPOINTS)
+#  МАРШРУТЫ ИНТЕРФЕЙСА И СТАТИКИ
 # ==========================================
 
 @app.get("/")
-def read_root():
-    return {"status": "online", "service": "Rubinov AI API"}
+def serve_index():
+    """Отдает ваш главный файл интерфейса index.html"""
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
+    return {"status": "online", "service": "Rubinov AI API", "error": "index.html not found"}
+
+# Подключаем папку со стилями/скриптами (если есть папка static)
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ==========================================
+#  МАРШРУТЫ API (АВТОРИЗАЦИЯ И ЧАТ)
+# ==========================================
 
 @app.post("/api/register")
 def register(user_data: UserRegister, db: sqlite3.Connection = Depends(get_db)):
