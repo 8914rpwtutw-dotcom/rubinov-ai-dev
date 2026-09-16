@@ -1,6 +1,6 @@
-fastapi
-uvicorn
-python-jose[cryptography]
-python-multipart
-google-auth
+flask
+flask-login
+werkzeug
+gunicorn
 requests
+google-auth
