@@ -5,8 +5,6 @@ from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -39,7 +37,6 @@ def get_db():
 def init_db():
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
-    # Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +45,6 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Таблица истории сообщений
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,10 +74,10 @@ class Token(BaseModel):
 
 class ChatRequest(BaseModel):
     prompt: str
-    image: Optional[str] = None  # Base64 строка картинки
+    image: Optional[str] = None
 
 # ==========================================
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АВТОРИЗАЦИИ
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -118,7 +114,10 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: sqlite3.Connection
 #  МАРШРУТЫ (ENDPOINTS)
 # ==========================================
 
-# 1. Регистрация
+@app.get("/")
+def read_root():
+    return {"status": "online", "service": "Rubinov AI API"}
+
 @app.post("/api/register")
 def register(user_data: UserRegister, db: sqlite3.Connection = Depends(get_db)):
     username = user_data.username.strip()
@@ -137,7 +136,6 @@ def register(user_data: UserRegister, db: sqlite3.Connection = Depends(get_db)):
 
     return {"status": "ok", "message": "Регистрация успешна"}
 
-# 2. Вход (Получение JWT-токена)
 @app.post("/api/token", response_model=Token)
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: sqlite3.Connection = Depends(get_db)):
     user = db.execute("SELECT * FROM users WHERE username = ?", (form_data.username,)).fetchone()
@@ -153,12 +151,10 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# 3. Проверка текущего пользователя
 @app.get("/api/me")
 def read_users_me(current_user: dict = Depends(get_current_user)):
     return {"id": current_user["id"], "username": current_user["username"]}
 
-# 4. Основной эндпоинт чата Rubinov AI
 @app.post("/api/chat")
 def chat_handler(payload: ChatRequest, current_user: dict = Depends(get_current_user), db: sqlite3.Connection = Depends(get_db)):
     prompt = payload.prompt.strip()
@@ -167,24 +163,20 @@ def chat_handler(payload: ChatRequest, current_user: dict = Depends(get_current_
     if not prompt and not image_base64:
         raise HTTPException(status_code=400, detail="Пустой запрос")
 
-    # Сохраняем запрос пользователя
     db.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
                (current_user["id"], "user", prompt))
     db.commit()
 
-    # Сценарий генерации изображений
     if prompt.lower().startswith("нарисуй") or prompt.lower().startswith("draw"):
         clean_prompt = prompt.split(":", 1)[-1].strip() if ":" in prompt else prompt
         bot_response = f"Изображение по запросу «{clean_prompt}» сформировано."
-        image_url = "https://picsum.photos/800/600"  # Сда подключается Imagen API
+        image_url = "https://picsum.photos/800/600"
 
         db.execute("INSERT INTO messages (user_id, role, content, image_url) VALUES (?, ?, ?, ?)",
                    (current_user["id"], "bot", bot_response, image_url))
         db.commit()
 
         return {"response": bot_response, "image_url": image_url}
-
-    # Текстовый сценарий
     else:
         bot_response = f"Ответ Rubinov AI для {current_user['username']}: {prompt}"
         if image_base64:
@@ -196,7 +188,6 @@ def chat_handler(payload: ChatRequest, current_user: dict = Depends(get_current_
 
         return {"response": bot_response}
 
-# 5. Получение истории чата
 @app.get("/api/history")
 def get_history(current_user: dict = Depends(get_current_user), db: sqlite3.Connection = Depends(get_db)):
     rows = db.execute(
