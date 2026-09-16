@@ -17,8 +17,7 @@ from google.auth.transport import requests as google_requests
 # ==========================================
 
 PORT = int(os.getenv("PORT", 3000))
-SECRET_KEY = os.getenv("JWT_SECRET", "rubinov-ai-super-secret-key-2026")
-# Укажите ваш Client ID из Google Cloud Console (или задайте в Render в Environment Variables)
+SECRET_KEY = os.getenv("JWT_SECRET", "rubinov_ai_secure_jwt_token_key_2026_984f1a27b8c0e42d")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com")
 
 ALGORITHM = "HS256"
@@ -91,7 +90,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
     }
 
 # ==========================================
-# API АВТОРИЗАЦИИ ЧЕРЕЗ GOOGLE
+# API АВТОРИЗАЦИИ ЧЕРЕЗ GOOGLE И ЧАТ
 # ==========================================
 
 class GoogleAuthRequest(BaseModel):
@@ -100,7 +99,6 @@ class GoogleAuthRequest(BaseModel):
 @app.post("/api/auth/google")
 def google_auth(data: GoogleAuthRequest):
     try:
-        # Проверка токена от Google
         id_info = id_token.verify_oauth2_token(
             data.credential, 
             google_requests.Request(), 
@@ -115,7 +113,6 @@ def google_auth(data: GoogleAuthRequest):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
 
-        # Создаем или обновляем пользователя
         cursor.execute("SELECT google_id FROM users WHERE google_id = ?", (google_id,))
         user = cursor.fetchone()
         
@@ -133,7 +130,6 @@ def google_auth(data: GoogleAuthRequest):
         conn.commit()
         conn.close()
 
-        # Генерируем собственный JWT
         token = create_access_token(
             data={"sub": google_id},
             expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
