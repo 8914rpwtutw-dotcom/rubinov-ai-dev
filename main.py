@@ -3,30 +3,27 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from jose import JWTError, jwt
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
-# ==========================================
-#  НАСТРОЙКИ И БЕЗОПАСНОСТЬ
-# ==========================================
 SECRET_KEY = "rubinov_ai_secret_key_change_in_production"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 часа
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token", auto_error=False)
 
 app = FastAPI(title="Rubinov AI Server")
 DATABASE = "rubinov_ai.db"
 
-# ==========================================
-#  РАБОТА С БАЗОЙ ДАННЫХ SQLite
-# ==========================================
 def get_db():
     conn = sqlite3.connect(DATABASE)
     conn.row_factory = sqlite3.Row
@@ -42,19 +39,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
-            hashed_password TEXT NOT NULL,
+            hashed_password TEXT,
+            google_id TEXT UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id INTEGER,
+            session_id TEXT,
             role TEXT NOT NULL,
             content TEXT,
             image_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -62,148 +60,132 @@ def init_db():
 
 init_db()
 
-# ==========================================
-#  PYDANTIC СХЕМЫ
-# ==========================================
 class UserRegister(BaseModel):
     username: str
     password: str
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
+class GoogleAuthRequest(BaseModel):
+    credential: str
 
 class ChatRequest(BaseModel):
     prompt: str
+    session_id: str
     image: Optional[str] = None
 
-# ==========================================
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ==========================================
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: sqlite3.Connection = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Не удалось проверить учетные данные",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+def get_current_user_optional(token: Optional[str] = Depends(oauth2_scheme), db: sqlite3.Connection = Depends(get_db)):
+    if not token:
+        return None
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
-            raise credentials_exception
+            return None
     except JWTError:
-        raise credentials_exception
+        return None
 
     user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
-    if user is None:
-        raise credentials_exception
-    return dict(user)
+    return dict(user) if user else None
 
-# ==========================================
-#  МАРШРУТЫ ИНТЕРФЕЙСА И СТАТИКИ
-# ==========================================
-
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def serve_index():
-    """Отдает ваш главный файл интерфейса из папки public"""
     if os.path.exists("public/index.html"):
-        return FileResponse("public/index.html")
-    return {"status": "online", "service": "Rubinov AI API", "error": "index.html not found in public folder"}
+        with open("public/index.html", "r", encoding="utf-8") as f:
+            return f.read()
+    return "<h3>index.html not found in public folder</h3>"
 
-# Подключаем папку public для раздачи статических файлов (css, js, картинки)
 if os.path.exists("public"):
     app.mount("/public", StaticFiles(directory="public"), name="public")
-
-# ==========================================
-#  МАРШРУТЫ API (АВТОРИЗАЦИЯ И ЧАТ)
-# ==========================================
 
 @app.post("/api/register")
 def register(user_data: UserRegister, db: sqlite3.Connection = Depends(get_db)):
     username = user_data.username.strip()
     password = user_data.password.strip()
-
     if not username or not password:
         raise HTTPException(status_code=400, detail="Логин и пароль обязательны")
-
-    hashed_pw = get_password_hash(password)
+    
+    hashed_pw = pwd_context.hash(password)
     try:
-        cursor = db.cursor()
-        cursor.execute("INSERT INTO users (username, hashed_password) VALUES (?, ?)", (username, hashed_pw))
+        db.execute("INSERT INTO users (username, hashed_password) VALUES (?, ?)", (username, hashed_pw))
         db.commit()
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Пользователь с таким именем уже существует")
+        raise HTTPException(status_code=400, detail="Пользователь уже существует")
+    
+    access_token = jwt.encode({"sub": username, "exp": datetime.utcnow() + timedelta(days=1)}, SECRET_KEY, algorithm=ALGORITHM)
+    return {"access_token": access_token, "token_type": "bearer", "username": username}
 
-    return {"status": "ok", "message": "Регистрация успешна"}
-
-@app.post("/api/token", response_model=Token)
-def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: sqlite3.Connection = Depends(get_db)):
+@app.post("/api/token")
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: sqlite3.Connection = Depends(get_db)):
     user = db.execute("SELECT * FROM users WHERE username = ?", (form_data.username,)).fetchone()
-    if not user or not verify_password(form_data.password, user["hashed_password"]):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user["username"]}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
+    if not user or not user["hashed_password"] or not pwd_context.verify(form_data.password, user["hashed_password"]):
+        raise HTTPException(status_code=400, detail="Неверный логин или пароль")
+    
+    access_token = jwt.encode({"sub": user["username"], "exp": datetime.utcnow() + timedelta(days=1)}, SECRET_KEY, algorithm=ALGORITHM)
+    return {"access_token": access_token, "token_type": "bearer", "username": user["username"]}
+
+@app.post("/api/google-login")
+def google_login(payload: GoogleAuthRequest, db: sqlite3.Connection = Depends(get_db)):
+    try:
+        idinfo = id_token.verify_oauth2_token(payload.credential, google_requests.Request(), GOOGLE_CLIENT_ID)
+        email = idinfo["email"]
+        name = idinfo.get("name", email.split("@")[0])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Ошибка авторизации Google")
+
+    user = db.execute("SELECT * FROM users WHERE username = ?", (email,)).fetchone()
+    if not user:
+        db.execute("INSERT INTO users (username, google_id) VALUES (?, ?)", (email, idinfo["sub"]))
+        db.commit()
+
+    access_token = jwt.encode({"sub": email, "exp": datetime.utcnow() + timedelta(days=1)}, SECRET_KEY, algorithm=ALGORITHM)
+    return {"access_token": access_token, "token_type": "bearer", "username": email}
 
 @app.get("/api/me")
-def read_users_me(current_user: dict = Depends(get_current_user)):
-    return {"id": current_user["id"], "username": current_user["username"]}
+def get_me(current_user: dict = Depends(get_current_user_optional)):
+    if not current_user:
+        return {"username": None}
+    return {"username": current_user["username"]}
 
 @app.post("/api/chat")
-def chat_handler(payload: ChatRequest, current_user: dict = Depends(get_current_user), db: sqlite3.Connection = Depends(get_db)):
+def chat_handler(payload: ChatRequest, request: Request, current_user: dict = Depends(get_current_user_optional), db: sqlite3.Connection = Depends(get_db)):
     prompt = payload.prompt.strip()
-    image_base64 = payload.image
-
-    if not prompt and not image_base64:
+    session_id = payload.session_id
+    if not prompt:
         raise HTTPException(status_code=400, detail="Пустой запрос")
 
-    db.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-               (current_user["id"], "user", prompt))
+    user_id = current_user["id"] if current_user else None
+
+    # Проверка лимита для гостей (10 запросов по IP или session_id)
+    if not current_user:
+        count_row = db.execute(
+            "SELECT COUNT(*) as cnt FROM messages WHERE user_id IS NULL and session_id = ? and role = 'user'", 
+            (session_id,)
+        ).fetchone()
+        if count_row["cnt"] >= 10:
+            raise HTTPException(
+                status_code=403, 
+                detail="Лимит бесплатного гостевого режима исчерпан (10 запросов). Войдите в аккаунт или через Google, чтобы продолжить без ограничений!"
+            )
+
+    db.execute("INSERT INTO messages (user_id, session_id, role, content) VALUES (?, ?, ?, ?)",
+               (user_id, session_id, "user", prompt))
     db.commit()
 
-    if prompt.lower().startswith("нарисуй") or prompt.lower().startswith("draw"):
-        clean_prompt = prompt.split(":", 1)[-1].strip() if ":" in prompt else prompt
-        bot_response = f"Изображение по запросу «{clean_prompt}» сформировано."
+    bot_response = f"Rubinov AI ответ: {prompt}"
+    image_url = None
+    if prompt.lower().startswith("нарисуй"):
         image_url = "https://picsum.photos/800/600"
+        bot_response = "Сгенерированное изображение:"
 
-        db.execute("INSERT INTO messages (user_id, role, content, image_url) VALUES (?, ?, ?, ?)",
-                   (current_user["id"], "bot", bot_response, image_url))
-        db.commit()
+    db.execute("INSERT INTO messages (user_id, session_id, role, content, image_url) VALUES (?, ?, ?, ?, ?)",
+               (user_id, session_id, "bot", bot_response, image_url))
+    db.commit()
 
-        return {"response": bot_response, "image_url": image_url}
-    else:
-        bot_response = f"Ответ Rubinov AI для {current_user['username']}: {prompt}"
-        if image_base64:
-            bot_response += " (Изображение успешно обработано)"
-
-        db.execute("INSERT INTO messages (user_id, role, content) VALUES (?, ?, ?)",
-                   (current_user["id"], "bot", bot_response))
-        db.commit()
-
-        return {"response": bot_response}
+    return {"response": bot_response, "image_url": image_url}
 
 @app.get("/api/history")
-def get_history(current_user: dict = Depends(get_current_user), db: sqlite3.Connection = Depends(get_db)):
-    rows = db.execute(
-        "SELECT role, content, image_url, created_at FROM messages WHERE user_id = ? ORDER BY id ASC",
-        (current_user["id"],)
-    ).fetchall()
+def get_history(session_id: str, current_user: dict = Depends(get_current_user_optional), db: sqlite3.Connection = Depends(get_db)):
+    if current_user:
+        rows = db.execute("SELECT role, content, image_url FROM messages WHERE user_id = ? AND session_id = ? ORDER BY id ASC", (current_user["id"], session_id)).fetchall()
+    else:
+        rows = db.execute("SELECT role, content, image_url FROM messages WHERE user_id IS NULL AND session_id = ? ORDER BY id ASC", (session_id,)).fetchall()
     return {"history": [dict(r) for r in rows]}
