@@ -117,14 +117,14 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: sqlite3.Connection
 
 @app.get("/")
 def serve_index():
-    """Отдает ваш главный файл интерфейса index.html"""
-    if os.path.exists("index.html"):
-        return FileResponse("index.html")
-    return {"status": "online", "service": "Rubinov AI API", "error": "index.html not found"}
+    """Отдает ваш главный файл интерфейса из папки public"""
+    if os.path.exists("public/index.html"):
+        return FileResponse("public/index.html")
+    return {"status": "online", "service": "Rubinov AI API", "error": "index.html not found in public folder"}
 
-# Подключаем папку со стилями/скриптами (если есть папка static)
-if os.path.exists("static"):
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+# Подключаем папку public для раздачи статических файлов (css, js, картинки)
+if os.path.exists("public"):
+    app.mount("/public", StaticFiles(directory="public"), name="public")
 
 # ==========================================
 #  МАРШРУТЫ API (АВТОРИЗАЦИЯ И ЧАТ)
