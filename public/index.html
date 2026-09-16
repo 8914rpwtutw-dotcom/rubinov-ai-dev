@@ -1,1 +1,246 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Рубинов ИИ — Авторизация</title>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background-color: #0f172a; color: #f8fafc; display: flex; height: 100vh; overflow: hidden; }
 
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 23, 42, 0.95); display: flex; align-items: center; justify-content: center;
+      z-index: 1000; backdrop-filter: blur(8px);
+    }
+    .modal {
+      background: #1e293b; padding: 32px; border-radius: 16px; width: 360px;
+      border: 1px solid #334155; text-align: center; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+      display: flex; flex-direction: column; align-items: center;
+    }
+    .modal h2 { margin-bottom: 8px; font-size: 22px; color: #38bdf8; }
+    .modal p { font-size: 13px; color: #94a3b8; margin-bottom: 24px; line-height: 1.4; }
+    .error-msg { color: #f87171; font-size: 13px; margin-top: 12px; }
+
+    .app { display: flex; width: 100%; height: 100%; }
+    aside {
+      width: 260px; background: #1e293b; border-right: 1px solid #334155;
+      display: flex; flex-direction: column; padding: 16px; gap: 16px;
+    }
+    .brand { font-size: 18px; font-weight: bold; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
+    .user-profile { display: flex; align-items: center; gap: 12px; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; }
+    .user-avatar { width: 40px; height: 40px; border-radius: 50%; }
+    .user-details { font-size: 13px; overflow: hidden; }
+    .user-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .user-email { color: #94a3b8; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    main { flex: 1; display: flex; flex-direction: column; background: #0f172a; }
+    header { padding: 16px 24px; border-bottom: 1px solid #334155; }
+    .chat-container { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+    .msg { max-width: 75%; padding: 14px 18px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
+    .msg.user { align-self: flex-end; background: #0284c7; color: white; border-bottom-right-radius: 2px; }
+    .msg.ai { align-self: flex-start; background: #1e293b; color: #e2e8f0; border-bottom-left-radius: 2px; border: 1px solid #334155; }
+    .msg img { max-width: 100%; border-radius: 8px; margin-top: 10px; display: block; cursor: pointer; }
+
+    .input-wrapper { padding: 16px 24px; border-top: 1px solid #334155; background: #1e293b; }
+    .input-box { display: flex; gap: 12px; }
+    .input-box input { flex: 1; padding: 14px; background: #0f172a; border: 1px solid #475569; border-radius: 8px; color: white; }
+    .btn { padding: 12px 20px; background: #0284c7; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; }
+    .btn-secondary { background: transparent; border: 1px solid #475569; color: #94a3b8; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+  <div id="authModal" class="modal-overlay">
+    <div class="modal">
+      <h2>Войти в Рубинов ИИ</h2>
+      <p>Авторизуйтесь через ваш аккаунт Google для доступа к чату</p>
+
+      <div id="g_id_onload"
+           data-client_id="456399427995-vm7t0rmj7ar701lhj3v5i72pgjcm1tep.apps.googleusercontent.com"
+           data-callback="handleCredentialResponse">
+      </div>
+      <div class="g_id_signin" data-type="standard" data-size="large" data-theme="dark"></div>
+
+      <div id="authError" class="error-msg"></div>
+    </div>
+  </div>
+
+  <div class="app">
+    <aside>
+      <div class="brand">💎 Рубинов ИИ</div>
+      
+      <div class="user-profile">
+        <img id="userAvatar" class="user-avatar" src="" alt="Avatar" />
+        <div class="user-details">
+          <div id="userName" class="user-name">...</div>
+          <div id="userEmail" class="user-email">...</div>
+        </div>
+      </div>
+
+      <button class="btn btn-secondary" onclick="downloadHistory()">📥 Скачать историю</button>
+      <button class="btn btn-secondary" style="margin-top: auto;" onclick="logout()">Выйти</button>
+    </aside>
+
+    <main>
+      <header>
+        <h4 style="color: #cbd5e1;">Чат</h4>
+      </header>
+
+      <div id="chatContainer" class="chat-container"></div>
+
+      <div class="input-wrapper">
+        <div class="input-box">
+          <input type="text" id="userInput" placeholder="Напишите сообщение..." onkeypress="if(event.key==='Enter') handleSend()" />
+          <button id="sendBtn" class="btn" onclick="handleSend()">Отправить</button>
+          <button id="cancelBtn" class="btn hidden" style="background: #ef4444;" onclick="cancelRequest()">Отмена</button>
+        </div>
+        <div id="cancelStatus" style="font-size: 12px; color: #94a3b8; margin-top: 6px; text-align: center;"></div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    let activeController = null;
+    let chatHistory = [];
+
+    document.addEventListener('DOMContentLoaded', () => {
+      const token = localStorage.getItem('rubinov_token');
+      if (!token) {
+        showModal(true);
+      } else {
+        loadUserProfile();
+      }
+    });
+
+    function showModal(show) {
+      document.getElementById('authModal').classList.toggle('hidden', !show);
+    }
+
+    async function handleCredentialResponse(response) {
+      const errorDiv = document.getElementById('authError');
+      errorDiv.innerText = '';
+
+      try {
+        const res = await fetch('/api/auth/google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credential: response.credential })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Ошибка авторизации Google');
+
+        localStorage.setItem('rubinov_token', data.access_token);
+        showModal(false);
+        loadUserProfile();
+      } catch (err) {
+        errorDiv.innerText = err.message;
+      }
+    }
+
+    async function loadUserProfile() {
+      const token = localStorage.getItem('rubinov_token');
+      try {
+        const res = await fetch('/api/me', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!res.ok) throw new Error();
+        const user = await res.json();
+
+        document.getElementById('userName').innerText = user.name || 'Пользователь';
+        document.getElementById('userEmail').innerText = user.email || '';
+        document.getElementById('userAvatar').src = user.picture || 'https://via.placeholder.com/40';
+      } catch {
+        logout();
+      }
+    }
+
+    function logout() {
+      localStorage.removeItem('rubinov_token');
+      showModal(true);
+    }
+
+    async function handleSend() {
+      const input = document.getElementById('userInput');
+      const text = input.value.trim();
+      if (!text) return;
+
+      const token = localStorage.getItem('rubinov_token');
+      appendMessage(text, 'user');
+      chatHistory.push(`Вы: ${text}`);
+      input.value = '';
+
+      toggleInputLock(true);
+      document.getElementById('cancelStatus').innerText = '';
+      activeController = new AbortController();
+
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ message: text }),
+          signal: activeController.signal
+        });
+
+        if (res.status === 401) { logout(); return; }
+
+        const data = await res.json();
+        appendMessage(data.reply, 'ai', data.image_url);
+        chatHistory.push(`ИИ: ${data.reply}`);
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          document.getElementById('cancelStatus').innerText = 'сообщение отменино';
+        } else {
+          appendMessage('Ошибка обработки запроса', 'ai');
+        }
+      } finally {
+        toggleInputLock(false);
+        activeController = null;
+      }
+    }
+
+    function cancelRequest() {
+      if (activeController) activeController.abort();
+    }
+
+    function toggleInputLock(isLocked) {
+      document.getElementById('userInput').disabled = isLocked;
+      document.getElementById('sendBtn').classList.toggle('hidden', isLocked);
+      document.getElementById('cancelBtn').classList.toggle('hidden', !isLocked);
+    }
+
+    function appendMessage(text, role, imageUrl = null) {
+      const container = document.getElementById('chatContainer');
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `msg ${role}`;
+      msgDiv.innerText = text;
+
+      if (imageUrl) {
+        const img = document.createElement('img');
+        img.src = imageUrl;
+        img.onclick = () => window.open(imageUrl, '_blank');
+        msgDiv.appendChild(img);
+      }
+
+      container.appendChild(msgDiv);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function downloadHistory() {
+      if (!chatHistory.length) return alert('История пуста');
+      const blob = new Blob([chatHistory.join('\n\n')], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `history-${Date.now()}.txt`;
+      a.click();
+    }
+  </script>
+</body>
+</html>
