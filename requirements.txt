@@ -1,6 +1,7 @@
-flask
-flask-login
-werkzeug
-gunicorn
-requests
+fastapi
+uvicorn
+python-multipart
 google-auth
+requests
+python-jose[cryptography]
+passlib[bcrypt]
