@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+python-jose[cryptography]
 python-multipart
-google-genai
-google-auth
+aiogram
+sqlite3
