@@ -9,6 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Подключаем Google Identity Services SDK -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 
 <style>
@@ -208,6 +209,38 @@ body.sidebar-collapsed #sidebar {
     color:#cbd5e1;
     cursor:pointer;
     transition:.2s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.chat-item span.chat-title-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.chat-item .delete-chat-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 13px;
+    cursor: pointer;
+    padding: 2px 5px;
+    border-radius: 4px;
+    opacity: 0;
+    transition: 0.2s;
+}
+
+.chat-item:hover .delete-chat-btn {
+    opacity: 1;
+}
+
+.chat-item .delete-chat-btn:hover {
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.1);
 }
 
 .chat-item:hover, .chat-item.active {
@@ -216,7 +249,6 @@ body.sidebar-collapsed #sidebar {
     color:white;
 }
 
-/* User profile & Google Login in sidebar */
 .user-profile-section {
     margin-top:auto;
     padding-top:12px;
@@ -308,6 +340,10 @@ body.sidebar-collapsed #sidebar {
     font-size:14px;
     font-weight:600;
     color:white;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 600px;
 }
 
 #chat-container {
@@ -366,6 +402,7 @@ body.sidebar-collapsed #sidebar {
     color:white;
     font-size:13.5px;
     line-height:1.55;
+    word-break: break-word;
 }
 
 .msg-bot {
@@ -377,6 +414,7 @@ body.sidebar-collapsed #sidebar {
     color:#e2e8f0;
     font-size:13.5px;
     line-height:1.65;
+    word-break: break-word;
 }
 
 .loader-box {
@@ -527,15 +565,15 @@ body.sidebar-collapsed #sidebar {
     </div>
 
     <div id="chats-list">
-        <div class="chat-item active" onclick="selectChat('default', this)">Основной чат</div>
+        <!-- Сгенерированные чаты будут здесь -->
     </div>
 
     <div class="user-profile-section">
         <div class="user-status-text" id="userStatus">Проверка статуса...</div>
         
-        <!-- Google Sign-In Button Container -->
+        <!-- Встроен ваш реальный Google Client ID -->
         <div id="g_id_onload"
-             data-client_id="YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
+             data-client_id="456399427995-vm7t0rmj7ar701lhj3v5i72pgjcm1tep.apps.googleusercontent.com"
              data-callback="handleGoogleLogin"
              data-auto_prompt="false">
         </div>
@@ -598,8 +636,10 @@ const fileBar = document.getElementById("file-info-bar");
 const fileName = document.getElementById("file-name");
 const removeFile = document.getElementById("remove-file");
 
-let currentSessionId = 'default_' + Date.now();
+let currentSessionId = 'chat_' + Date.now();
 let token = localStorage.getItem('token');
+let chatTitles = JSON.parse(localStorage.getItem('chatTitles') || '{}');
+let chatSessions = JSON.parse(localStorage.getItem('chatSessions') || '["' + currentSessionId + '"]');
 
 menu.addEventListener("click", () => {
     if (window.innerWidth <= 768) {
@@ -630,7 +670,13 @@ imageButton.addEventListener("click", () => {
     input.focus();
 });
 
-// Проверка пользователя и обновление статуса лимита
+// Генерация названия строго из первых 4 слов
+function generateShortTitle(text) {
+    const words = text.replace(/[#_*`"'.,!?]/g, '').trim().split(/\s+/);
+    const selected = words.slice(0, 4).join(' ');
+    return selected ? selected : "Новый диалог";
+}
+
 async function checkUser() {
     let headers = token ? {'Authorization': 'Bearer ' + token} : {};
     try {
@@ -652,6 +698,7 @@ async function checkUser() {
     } catch (e) {
         console.error(e);
     }
+    renderChatList();
     loadHistory();
 }
 
@@ -680,61 +727,109 @@ function logout() {
 
 function newChat() {
     currentSessionId = 'chat_' + Date.now();
-    let list = document.getElementById('chats-list');
+    if (!chatSessions.includes(currentSessionId)) {
+        chatSessions.unshift(currentSessionId);
+        localStorage.setItem('chatSessions', JSON.stringify(chatSessions));
+    }
     
-    // Снимаем класс active со всех
-    document.querySelectorAll('.chat-item').forEach(el => el.classList.remove('active'));
-    
-    let item = document.createElement('div');
-    item.className = 'chat-item active';
-    item.innerText = 'Чат ' + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-    item.onclick = () => selectChat(currentSessionId, item);
-    list.prepend(item);
-
-    document.getElementById('currentChatTitle').innerText = item.innerText;
-    chat.innerHTML = `
-        <div class="welcome-screen" id="welcomeScreen">
-            <div class="welcome-avatar"><span>◆</span></div>
-            <h1>Rubinov AI</h1>
-            <p>Чем я могу помочь вам сегодня?</p>
-        </div>
-    `;
+    renderChatList();
+    loadHistory();
 }
 
-function selectChat(id, el) {
+function selectChat(id) {
     currentSessionId = id;
-    document.querySelectorAll('.chat-item').forEach(item => item.classList.remove('active'));
-    if(el) el.classList.add('active');
+    renderChatList();
     loadHistory();
+    if (window.innerWidth <= 768) {
+        sidebar.classList.remove("mobile-open");
+        overlay.classList.remove("active");
+    }
+}
+
+function deleteChat(id, event) {
+    event.stopPropagation();
+    
+    chatSessions = chatSessions.filter(s => s !== id);
+    localStorage.setItem('chatSessions', JSON.stringify(chatSessions));
+    delete chatTitles[id];
+    localStorage.setItem('chatTitles', JSON.stringify(chatTitles));
+
+    if (chatSessions.length === 0) {
+        newChat();
+    } else if (currentSessionId === id) {
+        selectChat(chatSessions[0]);
+    } else {
+        renderChatList();
+    }
+}
+
+function renderChatList() {
+    let list = document.getElementById('chats-list');
+    list.innerHTML = '';
+
+    if (chatSessions.length === 0) {
+        newChat();
+        return;
+    }
+
+    chatSessions.forEach(id => {
+        let item = document.createElement('div');
+        item.className = 'chat-item ' + (id === currentSessionId ? 'active' : '');
+        
+        let titleText = chatTitles[id] || "Новый диалог";
+        
+        item.innerHTML = `
+            <span class="chat-title-text">${escapeHtml(titleText)}</span>
+            <button class="delete-chat-btn" title="Удалить чат" onclick="deleteChat('${id}', event)">✕</button>
+        `;
+        item.onclick = () => selectChat(id);
+        list.appendChild(item);
+    });
+
+    let currentTitle = chatTitles[currentSessionId] || "Основной чат";
+    document.getElementById('currentChatTitle').innerText = currentTitle;
 }
 
 async function loadHistory() {
     let headers = token ? {'Authorization': 'Bearer ' + token} : {};
-    let res = await fetch(`/api/history?session_id=${currentSessionId}`, {headers});
-    let data = await res.json();
-    
-    if (data.history && data.history.length > 0) {
+    try {
+        let res = await fetch(`/api/history?session_id=${currentSessionId}`, {headers});
+        let data = await res.json();
+        
         chat.innerHTML = '';
-        data.history.forEach(msg => {
-            let row = document.createElement('div');
-            row.className = 'msg-row ' + (msg.role === 'user' ? 'user-row' : 'bot-row');
-            
-            let bubble = document.createElement('div');
-            bubble.className = msg.role === 'user' ? 'msg-user' : 'msg-bot';
-            bubble.innerText = msg.content;
-            
-            if (msg.image_url) {
-                let img = document.createElement('img');
-                img.src = msg.image_url;
-                img.style.maxWidth = '100%';
-                img.style.borderRadius = '12px';
-                img.style.marginTop = '10px';
-                bubble.appendChild(img);
-            }
-            row.appendChild(bubble);
-            chat.appendChild(row);
-        });
+        
+        if (data.history && data.history.length > 0) {
+            data.history.forEach(msg => {
+                let row = document.createElement('div');
+                row.className = 'msg-row ' + (msg.role === 'user' ? 'user-row' : 'bot-row');
+                
+                let bubble = document.createElement('div');
+                bubble.className = msg.role === 'user' ? 'msg-user' : 'msg-bot';
+                bubble.innerText = msg.content;
+                
+                if (msg.image_url) {
+                    let img = document.createElement('img');
+                    img.src = msg.image_url;
+                    img.style.maxWidth = '100%';
+                    img.style.borderRadius = '12px';
+                    img.style.marginTop = '10px';
+                    bubble.appendChild(img);
+                }
+                row.appendChild(bubble);
+                chat.appendChild(row);
+            });
+        } else {
+            chat.innerHTML = `
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-avatar"><span>◆</span></div>
+                    <h1>Rubinov AI</h1>
+                    <p>Чем я могу помочь вам сегодня?</p>
+                </div>
+            `;
+        }
         scrollBottom();
+    } catch(e) {
+        console.error("Ошибка загрузки истории:", e);
     }
 }
 
@@ -742,17 +837,21 @@ async function sendMessage() {
     const text = input.value.trim();
     if (!text) return;
 
-    // Убираем приветственный экран если он есть
+    // Автоматическое создание названия из первых 4 слов
+    if (!chatTitles[currentSessionId]) {
+        chatTitles[currentSessionId] = generateShortTitle(text);
+        localStorage.setItem('chatTitles', JSON.stringify(chatTitles));
+        renderChatList();
+    }
+
     let welcome = document.getElementById('welcomeScreen');
     if (welcome) welcome.remove();
 
-    // Добавляем сообщение пользователя
     const userRow = document.createElement("div");
     userRow.className = "msg-row user-row";
     userRow.innerHTML = `<div class="msg-user">${escapeHtml(text)}</div>`;
     chat.appendChild(userRow);
 
-    // Лоадер "Думаю..."
     const loader = document.createElement("div");
     loader.className = "msg-row bot-row";
     loader.innerHTML = `
@@ -797,7 +896,6 @@ async function sendMessage() {
             botRow.appendChild(botBubble);
             chat.appendChild(botRow);
         } else {
-            // Если лимит исчерпан (ошибка 403 от бэкенда)
             const errRow = document.createElement("div");
             errRow.className = "msg-row bot-row";
             errRow.innerHTML = `<div class="msg-bot" style="color: #f87171;">⚠️ ${data.detail || "Произошла ошибка"}</div>`;
