@@ -1,7 +1,5 @@
 fastapi
 uvicorn
-requests
-aiogram
-google-genai
-PyJWT
 python-multipart
+google-genai
+google-auth
