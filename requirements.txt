@@ -3,4 +3,3 @@ uvicorn
 python-multipart
 google-genai
 httpx
-requests
