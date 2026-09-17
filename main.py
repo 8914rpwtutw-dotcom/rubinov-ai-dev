@@ -163,7 +163,7 @@ def login_google(request: Request):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID не настроен")
     
-    current_redirect_uri = str(request.url_for("auth_google_callback"))
+    current_redirect_uri = os.getenv("REDIRECT_URI") or str(request.url_for("auth_google_callback"))
     
     google_auth_url = (
         f"https://accounts.google.com/o/oauth2/v2/auth?"
@@ -175,9 +175,14 @@ def login_google(request: Request):
     return RedirectResponse(google_auth_url)
 
 @app.get("/auth/google/callback")
-async def auth_google_callback(code: str, request: Request):
+async def auth_google_callback(request: Request, code: Optional[str] = None, error: Optional[str] = None):
+    if error:
+        raise HTTPException(status_code=400, detail=f"Google вернул ошибку: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Код авторизации (code) не получен от Google.")
+
     token_url = "https://oauth2.googleapis.com/token"
-    current_redirect_uri = str(request.url_for("auth_google_callback"))
+    current_redirect_uri = os.getenv("REDIRECT_URI") or str(request.url_for("auth_google_callback"))
     
     payload = {
         "code": code,
@@ -190,7 +195,7 @@ async def auth_google_callback(code: str, request: Request):
     async with httpx.AsyncClient() as client:
         token_res = await client.post(token_url, data=payload)
         if token_res.status_code != 200:
-            raise HTTPException(status_code=400, detail="Ошибка авторизации Google")
+            raise HTTPException(status_code=400, detail=f"Ошибка обмена токена с Google: {token_res.text}")
         
         token_data = token_res.json()
         access_token = token_data.get("access_token")
