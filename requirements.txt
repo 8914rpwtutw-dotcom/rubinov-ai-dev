@@ -1,8 +1,6 @@
 fastapi
 uvicorn
 python-multipart
-python-jose[cryptography]
-passlib[bcrypt]
-google-auth
-requests
+google-genai
 httpx
+requests
