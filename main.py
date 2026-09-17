@@ -38,8 +38,8 @@ def init_db():
 
 init_db()
 
-# Укажи здесь свой Google Email, чтобы получить права администратора
-ADMIN_EMAIL = "8914rpwtutw@gmail.com"  # <--- ПОМЕНЯЙ НА СВОЙ EMAIL
+# Твой административный email
+ADMIN_EMAIL = "8914rpwtutw@gmail.com"
 
 def get_user_status(email: str) -> str:
     if not email:
@@ -56,7 +56,6 @@ def get_user_status(email: str) -> str:
     if row:
         return row[0] # 'free', 'vip', 'banned'
     
-    # Если пользователя нет в базе — регистрируем автоматически как free
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO users (email, status) VALUES (?, 'free')", (email.lower(),))
@@ -69,10 +68,8 @@ MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-pro"]
 current_key_idx = 0
 current_model_idx = 0
 
-# Настройки Google OAuth
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "https://rubinovai-web.onrender.com/auth/google/callback")
 
 def get_api_keys():
     keys = [
@@ -160,28 +157,33 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 def health_check():
     return {"status": "ok"}
 
-# --- Маршруты Google OAuth ---
+# --- Маршруты Google OAuth с автоматическим определением дев/продакшна ---
 @app.get("/auth/google")
-def login_google():
+def login_google(request: Request):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID не настроен")
+    
+    current_redirect_uri = str(request.url_for("auth_google_callback"))
+    
     google_auth_url = (
         f"https://accounts.google.com/o/oauth2/v2/auth?"
         f"client_id={GOOGLE_CLIENT_ID}&"
-        f"redirect_uri={REDIRECT_URI}&"
+        f"redirect_uri={current_redirect_uri}&"
         f"response_type=code&"
         f"scope=openid%20email%20profile"
     )
     return RedirectResponse(google_auth_url)
 
 @app.get("/auth/google/callback")
-async def auth_google_callback(code: str):
+async def auth_google_callback(code: str, request: Request):
     token_url = "https://oauth2.googleapis.com/token"
+    current_redirect_uri = str(request.url_for("auth_google_callback"))
+    
     payload = {
         "code": code,
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
+        "redirect_uri": current_redirect_uri,
         "grant_type": "authorization_code",
     }
     
@@ -203,16 +205,17 @@ async def auth_google_callback(code: str):
         user_info = user_res.json()
         user_email = user_info.get("email")
 
-    # Регистрируем/проверяем пользователя в БД
     get_user_status(user_email)
 
-    response = RedirectResponse(url="/", status_code=303)
+    host_url = str(request.base_url)
+    response = RedirectResponse(url=host_url, status_code=303)
     response.set_cookie(key="user_email", value=user_email, httponly=True, max_age=86400 * 30)
     return response
 
 @app.get("/auth/logout")
-def logout():
-    response = RedirectResponse(url="/", status_code=303)
+def logout(request: Request):
+    host_url = str(request.base_url)
+    response = RedirectResponse(url=host_url, status_code=303)
     response.delete_cookie(key="user_email")
     return response
 
@@ -240,7 +243,7 @@ async def admin_update_status(request: Request):
     
     body = await request.json()
     target_email = body.get("email")
-    new_status = body.get("status") # 'free', 'vip', 'banned'
+    new_status = body.get("status")
     
     if new_status not in ["free", "vip", "banned"]:
         raise HTTPException(status_code=400, detail="Неверный статус")
@@ -265,13 +268,11 @@ async def chat_endpoint(
     user_email = request.cookies.get("user_email")
     status = get_user_status(user_email)
 
-    # Проверка на бан
     if status == "banned":
         raise HTTPException(status_code=403, detail="Ваш аккаунт заблокирован администратором.")
 
     guest_count = int(request.cookies.get("guest_requests", "0"))
 
-    # Проверка лимита 10 бесплатных запросов для гостей
     if not user_email:
         if guest_count >= 10:
             raise HTTPException(
@@ -425,7 +426,6 @@ HTML_TEMPLATE = """
         }
         .btn-admin-panel:hover { background: rgba(168, 85, 247, 0.25); color: #fff; }
 
-        /* Модальное окно админки */
         #admin-modal {
             display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100dvh;
             background: rgba(4, 5, 8, 0.8); backdrop-filter: blur(8px); z-index: 100;
@@ -607,7 +607,6 @@ HTML_TEMPLATE = """
 <body>
     <div id="sidebar-overlay" onclick="toggleSidebar()"></div>
 
-    <!-- Модальное окно админ-панели -->
     <div id="admin-modal" onclick="closeAdminModal(event)">
         <div class="admin-box" onclick="event.stopPropagation()">
             <div class="admin-header">
@@ -744,7 +743,6 @@ HTML_TEMPLATE = """
             }
         }
 
-        // Функции для админ-панели
         function toggleAdminModal(show) {
             const modal = document.getElementById('admin-modal');
             if (show) {
