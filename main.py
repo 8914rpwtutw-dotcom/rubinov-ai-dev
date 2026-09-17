@@ -6,12 +6,16 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, File, Form, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 import httpx
 
 app = FastAPI()
+
+# Поддержка HTTPS заголовков прокси Render
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=["*"])
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +43,7 @@ def init_db():
 init_db()
 
 # Твой административный email
-ADMIN_EMAIL = "8914rpwtutw@gmail.com"
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "8914rpwtutw@gmail.com")
 
 def get_user_status(email: str) -> str:
     if not email:
@@ -70,6 +74,12 @@ current_model_idx = 0
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+def get_redirect_uri(request: Request) -> str:
+    env_uri = os.getenv("REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI")
+    if env_uri:
+        return env_uri
+    return str(request.url_for("auth_google_callback"))
 
 def get_api_keys():
     keys = [
@@ -163,7 +173,7 @@ def login_google(request: Request):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(status_code=500, detail="GOOGLE_CLIENT_ID не настроен")
     
-    current_redirect_uri = os.getenv("REDIRECT_URI") or str(request.url_for("auth_google_callback"))
+    current_redirect_uri = get_redirect_uri(request)
     
     google_auth_url = (
         f"https://accounts.google.com/o/oauth2/v2/auth?"
@@ -182,7 +192,7 @@ async def auth_google_callback(request: Request, code: Optional[str] = None, err
         raise HTTPException(status_code=400, detail="Код авторизации (code) не получен от Google.")
 
     token_url = "https://oauth2.googleapis.com/token"
-    current_redirect_uri = os.getenv("REDIRECT_URI") or str(request.url_for("auth_google_callback"))
+    current_redirect_uri = get_redirect_uri(request)
     
     payload = {
         "code": code,
@@ -214,7 +224,14 @@ async def auth_google_callback(request: Request, code: Optional[str] = None, err
 
     host_url = str(request.base_url)
     response = RedirectResponse(url=host_url, status_code=303)
-    response.set_cookie(key="user_email", value=user_email, httponly=True, max_age=86400 * 30)
+    response.set_cookie(
+        key="user_email",
+        value=user_email,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=86400 * 30
+    )
     return response
 
 @app.get("/auth/logout")
