@@ -157,7 +157,7 @@ def get_gemini_response(prompt: str, file_bytes: Optional[bytes] = None, mime_ty
 def health_check():
     return {"status": "ok"}
 
-# --- Маршруты Google OAuth с автоматическим определением дев/продакшна ---
+# --- Маршруты Google OAuth ---
 @app.get("/auth/google")
 def login_google(request: Request):
     if not GOOGLE_CLIENT_ID:
