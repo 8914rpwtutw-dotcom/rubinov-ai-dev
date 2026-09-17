@@ -39,7 +39,7 @@ def init_db():
 init_db()
 
 # Укажи здесь свой Google Email, чтобы получить права администратора
-ADMIN_EMAIL = "alexandra.popova.dev@gmail.com"  # <--- ПОМЕНЯЙ НА СВОЙ EMAIL
+ADMIN_EMAIL = "8914rpwtutw@gmail.com"  # <--- ПОМЕНЯЙ НА СВОЙ EMAIL
 
 def get_user_status(email: str) -> str:
     if not email:
